@@ -10,6 +10,45 @@ gi.require_version("Gdk", "4.0")
 
 from gi.repository import Gtk, Adw, Gdk, GObject, Pango, PangoCairo, GLib
 
+CSS_OVERLAY_SCROLLBAR = """
+.scrollbar-overlay {
+    /* Default thickness when content scrolls */
+    min-width: 2px;
+    margin-right: 0px;
+    margin-bottom: 10px;
+    padding-top:4px;
+    padding-left:5px;
+    padding-right:5px;
+
+    background-color: rgba(255, 255, 255, 0.01);
+    border-radius: 12px;
+
+    transition:
+        min-width 200ms ease,
+        background-color 200ms ease,
+        border-radius 200ms ease;
+}
+
+/* Hover → wider */
+.scrollbar-overlay:hover {
+    min-width: 8px;
+    margin-right: 0px;
+    background-color: rgba(255, 255, 255, 0.02);
+    padding:5px;   
+}
+
+/* Dragging → fully expanded */
+.scrollbar-overlay.drag-active {
+    min-width: 8px;
+    margin-right: 0px;
+    background-color: rgba(255, 255, 255, 0.03);
+    padding:5px;
+}
+"""
+
+
+
+
 # ============================================================
 #   FULL INDEXING BUT MEMORY-SAFE
 # ============================================================
@@ -281,6 +320,7 @@ class VirtualBuffer(GObject.Object):
         self.selection.clear()
         self.emit("changed")
 
+
     def _logical_to_physical(self, logical_line):
         """Convert logical line number to physical file line number"""
         if not self.file:
@@ -462,6 +502,8 @@ class VirtualBuffer(GObject.Object):
         self.cursor_col = start_col
         self.selection.clear()
         self.emit("changed")
+        
+
         return True
 
     def insert_text(self, text):
@@ -489,6 +531,8 @@ class VirtualBuffer(GObject.Object):
 
             self.cursor_col += len(text)
             self.emit("changed")
+            
+
             return
 
         # ------------------------------------------------------------
@@ -544,6 +588,8 @@ class VirtualBuffer(GObject.Object):
 
         self.selection.clear()
         self.emit("changed")
+        
+
 
 
     def backspace(self):
@@ -590,6 +636,8 @@ class VirtualBuffer(GObject.Object):
 
         self.selection.clear()
         self.emit("changed")
+        
+
 
     def delete_key(self):
         """Handle Delete key press"""
@@ -631,6 +679,8 @@ class VirtualBuffer(GObject.Object):
         
         self.selection.clear()
         self.emit("changed")
+        
+
 
     def insert_newline(self):
         if self.selection.has_selection():
@@ -659,6 +709,8 @@ class VirtualBuffer(GObject.Object):
         self.cursor_col = 0
         self.selection.clear()
         self.emit("changed")
+        
+
 
     
 
@@ -762,6 +814,8 @@ class VirtualBuffer(GObject.Object):
         self.cursor_col = 0
         self.selection.clear()
         self.emit("changed")
+        
+
 
 # ============================================================
 #   INPUT
@@ -1210,6 +1264,12 @@ class VirtualTextView(Gtk.DrawingArea):
 
         self.start_cursor_blink()
 
+    def update_scrollbar(self):
+        sb = getattr(self, "scrollbar", None)
+        if sb is not None:
+            sb.update_visibility()
+            sb.queue_draw()
+
     # Correct UTF-8 byte-index for logical col → Pango visual mapping
     def visual_byte_index(self, text, col):
         b = 0
@@ -1470,6 +1530,7 @@ class VirtualTextView(Gtk.DrawingArea):
             self.keep_cursor_visible()
             self.update_im_cursor_location()
             self.queue_draw()
+            self.update_scrollbar() 
             return True
 
         # Navigation with selection support
@@ -1896,6 +1957,9 @@ class VirtualTextView(Gtk.DrawingArea):
         if dx:
             self.scroll_x = max(0, self.scroll_x + int(dx * 40))
 
+        self.update_scrollbar()
+
+
         self.queue_draw()
         return True
 
@@ -1924,84 +1988,167 @@ class VirtualTextView(Gtk.DrawingArea):
 # ============================================================
 
 class VirtualScrollbar(Gtk.DrawingArea):
+
     def __init__(self, view):
         super().__init__()
         self.view = view
 
-        self.set_size_request(14, -1)
-        self.set_vexpand(True)
-        self.set_hexpand(False)
+        self.set_halign(Gtk.Align.END)
+        self.set_valign(Gtk.Align.FILL)
+        self.set_size_request(2, -1)
+        self.add_css_class("scrollbar-overlay")
 
         self.set_draw_func(self.draw_scrollbar)
 
         click = Gtk.GestureClick()
         click.connect("pressed", self.on_click)
+        click.connect("released", self.on_release)
         self.add_controller(click)
 
         drag = Gtk.GestureDrag()
-        drag.connect("drag-update", self.on_drag)
+        drag.connect("drag-begin", self.on_drag_begin)
+        drag.connect("drag-update", self.on_drag_update)
+        drag.connect("drag-end", self.on_drag_end)
         self.add_controller(drag)
 
+        # NEW: hover detection
+        motion = Gtk.EventControllerMotion()
+        motion.connect("enter", self.on_enter)
+        motion.connect("leave", self.on_leave)
+        self.add_controller(motion)
+
+        self.hovering = False
         self.dragging = False
+        self.drag_start_y = 0
+
+    # ---------------------------------------------------------
+    # Automatically hide/ show depending on overflow
+    # ---------------------------------------------------------
+
+    def update_visibility(self):
+        """Hide scrollbar if there is no overflow."""
+        total = self.view.buf.total()
+        visible = max(1, self.view.get_height() // self.view.renderer.line_h)
+
+        if total <= visible:
+            self.set_visible(False)
+        else:
+            self.set_visible(True)
+
+    # ---------------------------------------------------------
+    # Drawing
+    # ---------------------------------------------------------
+
+    def on_enter(self, controller, x, y):
+        self.hovering = True
+        self.queue_draw()
+
+    def on_leave(self, controller):
+        self.hovering = False
+        self.queue_draw()
 
     def draw_scrollbar(self, area, cr, w, h):
-        cr.set_source_rgb(0.20, 0.20, 0.20)
-        cr.rectangle(0, 0, w, h)
-        cr.fill()
+        self.update_visibility()
+        if not self.get_visible():
+            return
 
         view = self.view
         total = view.buf.total()
-
-        # Visible lines (scrolling logic, no +1)
         max_vis = max(1, view.get_height() // view.renderer.line_h)
-
-        # How many lines we can scroll
         max_scroll = max(0, total - max_vis)
 
-        # Thumb height proportional, clamped correctly
         if total <= 0:
             thumb_h = h
         else:
             thumb_h = h * (max_vis / total)
-            thumb_h = max(20, min(h, thumb_h))
+            thumb_h = max(30, min(h, thumb_h))
 
-        # Position
-        if max_scroll <= 0:
+        if max_scroll == 0:
             pos = 0.0
         else:
             pos = view.scroll_line / max_scroll
 
-        pos = max(0.0, min(1.0, pos))
+        pos = max(0, min(1, pos))
         y = pos * (h - thumb_h)
 
-        cr.set_source_rgb(0.55, 0.55, 0.55)
-        cr.rectangle(0, y, w, thumb_h)
+        # NEW: brightness logic using hover + drag flags
+        if self.dragging:
+            alpha = 0.90
+        elif self.hovering:
+            alpha = 0.60
+        else:
+            alpha = 0.50
+
+        cr.set_source_rgba(1, 1, 1, alpha)
+
+        r = min(w, thumb_h) / 2.0
+        cr.new_path()
+        cr.arc(w - r, y + r,             r, -90 * math.pi/180, 0)
+        cr.arc(w - r, y + thumb_h - r,   r, 0, 90 * math.pi/180)
+        cr.arc(r,     y + thumb_h - r,   r, 90 * math.pi/180, 180*math.pi/180)
+        cr.arc(r,     y + r,             r, 180*math.pi/180, 270*math.pi/180)
+        cr.close_path()
         cr.fill()
 
-
+    # ---------------------------------------------------------
+    # Interaction
+    # ---------------------------------------------------------
 
     def on_click(self, g, n_press, x, y):
-        self.start_y = y
+        if not self.get_visible():
+            return
         self.dragging = True
+        self.drag_start_y = y
+        self.add_css_class("drag-active")
 
-    def on_drag(self, g, dx, dy):
-        if not self.dragging:
+    def on_release(self, g, n_press, x, y):
+        if not self.get_visible():
+            return
+        self.dragging = False
+        self.remove_css_class("drag-active")
+
+    def on_drag_begin(self, g, x, y):
+        if not self.get_visible():
+            return
+        self.dragging = True
+        self.add_css_class("drag-active")
+
+    def on_drag_end(self, g, dx, dy):
+        if not self.get_visible():
+            return
+        self.dragging = False
+        self.remove_css_class("drag-active")
+
+    def on_drag_update(self, g, dx, dy):
+        if not self.dragging or not self.get_visible():
             return
 
         view = self.view
-        h = self.get_height()  # GTK4: use get_height() instead of get_allocated_height()
+        h = self.get_height()
         total = view.buf.total()
+
         max_vis = max(1, view.get_height() // view.renderer.line_h)
         max_scroll = max(0, total - max_vis)
 
-        thumb_h = max(20, h * (max_vis / total))
-        track = h - thumb_h
-        frac = (self.start_y + dy) / track
-        frac = max(0, min(1, frac))
+        if max_scroll <= 0:
+            return
+
+        # Thumb height
+        thumb_h = h * (max_vis / total)
+        thumb_h = max(20, min(h, thumb_h))
+
+        # Track height
+        track = max(1, h - thumb_h)
+
+        frac = (self.drag_start_y + dy) / track
+        frac = max(0.0, min(1.0, frac))
 
         view.scroll_line = int(frac * max_scroll)
+
         view.queue_draw()
         self.queue_draw()
+
+
 
 
 # ============================================================
@@ -2054,6 +2201,10 @@ class EditorWindow(Adw.ApplicationWindow):
         self.buf = VirtualBuffer()
         self.view = VirtualTextView(self.buf)
         self.scrollbar = VirtualScrollbar(self.view)
+
+        # IMPORTANT: give the view a reference to the overlay scrollbar
+        self.view.scrollbar = self.scrollbar
+
         self.buf.connect("changed", self.on_buffer_changed)
 
         layout = Adw.ToolbarView()
@@ -2066,14 +2217,24 @@ class EditorWindow(Adw.ApplicationWindow):
         open_btn.connect("clicked", self.open_file)
         header.pack_start(open_btn)
 
-        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
-        box.append(self.view)
-        box.append(self.scrollbar)
+        overlay = Gtk.Overlay()
 
-        layout.set_content(box)
+        # main content
+        overlay.set_child(self.view)
+
+        # overlay scrollbar
+        overlay.add_overlay(self.scrollbar)
+
+        # let it float on top right
+        self.scrollbar.set_halign(Gtk.Align.END)
+        self.scrollbar.set_valign(Gtk.Align.FILL)
+
+        layout.set_content(overlay)
+
 
     def on_buffer_changed(self, *_):
         self.view.queue_draw()
+        self.scrollbar.update_visibility()   # NEW: auto-hide when content fits
         self.scrollbar.queue_draw()
 
 
@@ -2087,45 +2248,39 @@ class EditorWindow(Adw.ApplicationWindow):
                 return
             path = f.get_path()
             
-            # Show loading dialog
             loading_dialog = LoadingDialog(self)
             loading_dialog.present()
             
-            # Create indexed file
             idx = IndexedFile(path)
             
             def progress_callback(fraction):
-                """Update progress (called from worker thread via GLib.idle_add)"""
                 loading_dialog.update_progress(fraction)
-                return False  # Don't repeat
+                return False
             
             def index_complete():
-                """Called when indexing is done"""
-                # Load the indexed file into buffer
                 self.buf.load(idx)
+
                 self.view.scroll_line = 0
                 self.view.scroll_x = 0
-                
+
+                # update scrollbar after loading new file
+                self.scrollbar.update_visibility()
+
                 self.view.queue_draw()
                 self.scrollbar.queue_draw()
-                
+
                 self.set_title(os.path.basename(path))
-                
-                # Close loading dialog
                 loading_dialog.close()
-                return False  # Don't repeat
-            
+                return False
+
             def index_in_thread():
-                """Run indexing in background thread"""
                 try:
                     idx.index_file(progress_callback)
-                    # Schedule completion on main thread
                     GLib.idle_add(index_complete)
                 except Exception as e:
                     print(f"Error indexing file: {e}")
                     GLib.idle_add(loading_dialog.close)
             
-            # Start indexing in background thread
             thread = Thread(target=index_in_thread)
             thread.daemon = True
             thread.start()
@@ -2142,6 +2297,15 @@ class VirtualTextEditor(Adw.Application):
         super().__init__(application_id="io.github.fastrizwaan.vted")
 
     def do_activate(self):
+        provider = Gtk.CssProvider()
+        provider.load_from_data(CSS_OVERLAY_SCROLLBAR)
+
+        Gtk.StyleContext.add_provider_for_display(
+            Gdk.Display.get_default(),
+            provider,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        )
+
         win = self.props.active_window
         if not win:
             win = EditorWindow(self)
