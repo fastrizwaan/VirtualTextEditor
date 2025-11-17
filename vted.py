@@ -1112,11 +1112,19 @@ class Renderer:
         for ln in range(scroll_line, min(scroll_line + max_vis, total)):
             text = buf.get_line(ln)
 
-            # Line number (LTR always)
+            # Line number (LTR always, RIGHT ALIGNED)
             layout.set_auto_dir(False)
-            layout.set_text(str(ln + 1), -1)
+            line_num_str = str(ln + 1)
+            layout.set_text(line_num_str, -1)
+            
+            # Get the width of this line number
+            line_num_width, _ = layout.get_pixel_size()
+            
+            # Right align: position at (ln_width - line_num_width - right_padding)
+            line_num_x = ln_width - line_num_width - 10  # 10px right padding
+            
             cr.set_source_rgb(*self.linenumber_foreground_color)
-            cr.move_to(5, y)
+            cr.move_to(line_num_x, y)
             PangoCairo.show_layout(cr, layout)
 
             # Prepare for line text
@@ -1141,6 +1149,11 @@ class Renderer:
                     base_x = ln_width + available - scroll_x
             else:
                 base_x = ln_width - scroll_x
+            
+            # Set clipping region to prevent text from overlapping line numbers
+            cr.save()
+            cr.rectangle(ln_width, y, alloc.width - ln_width, self.line_h)
+            cr.clip()
 
             # Draw selection background for this line if needed
             if has_selection and sel_start_line <= ln <= sel_end_line:
@@ -1184,10 +1197,10 @@ class Renderer:
                 if is_rtl:
                     # RTL selection might need to be reversed
                     cr.rectangle(min(sel_start_x, sel_end_x), y, 
-                               abs(sel_end_x - sel_start_x), self.line_h)
+                            abs(sel_end_x - sel_start_x), self.line_h)
                 else:
                     cr.rectangle(sel_start_x, y, 
-                               sel_end_x - sel_start_x, self.line_h)
+                            sel_end_x - sel_start_x, self.line_h)
                 cr.fill()
 
             # Draw line text
@@ -1196,6 +1209,9 @@ class Renderer:
                 cr.move_to(base_x, y)
                 layout.set_text(text, -1)
                 PangoCairo.show_layout(cr, layout)
+            
+            # Restore clipping region
+            cr.restore()
 
             y += self.line_h
 
@@ -1310,8 +1326,7 @@ class Renderer:
                 cr.set_source_rgba(1, 1, 1, opacity * 0.45)
                 cr.move_to(cx_weak + 0.4, cy)
                 cr.line_to(cx_weak + 0.4, cy + self.text_h)
-                cr.stroke()
-   
+                cr.stroke()   
 
 
 
