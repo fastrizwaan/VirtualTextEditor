@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-import sys, os, mmap, gi, cairo
+import sys, os, mmap, gi, cairo, time
+from threading import Thread
+from array import array
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
@@ -34,52 +36,126 @@ class IndexedFile:
     """
 
     def __init__(self, path):
+        print(f"Opening file: {path}")
+        start = time.time()
+        
         self.path = path
         self.encoding = detect_encoding(path)
         self.raw = open(path, "rb")
         self.mm = mmap.mmap(self.raw.fileno(), 0, access=mmap.ACCESS_READ)
 
-        self.index = []
-        self.index_file()
+        print(f"File opened and mapped in {time.time()-start:.2f}s")
+        
+        # Use array.array instead of list - much faster for millions of integers
+        # 'Q' = unsigned long long (8 bytes, perfect for file offsets)
+        self.index = array('Q')
 
-    def index_file(self):
+    def index_file(self, progress_callback=None):
+        start_time = time.time()
         enc = self.encoding
+        
+        print(f"Indexing {len(self.mm) / (1024**3):.2f}GB file ({enc})...")
 
         if enc.startswith("utf-16"):
-            self._index_utf16()
+            self._index_utf16(progress_callback)
         else:
-            self._index_utf8()
+            self._index_utf8(progress_callback)
+        
+        elapsed = time.time() - start_time
+        index_size_mb = len(self.index) * 8 / (1024**2)  # 8 bytes per entry
+        
+        print(f"Indexed {len(self.index)-1:,} lines in {elapsed:.2f}s ({len(self.mm)/(1024**3)/elapsed:.2f} GB/s)")
+        print(f"Average line length: {len(self.mm)/(len(self.index)-1):.0f} bytes")
+        print(f"Index memory: {index_size_mb:.1f} MB ({index_size_mb*100/len(self.mm)*1024:.2f}% of file size)")
 
-    def _index_utf8(self):
+    def _index_utf8(self, progress_callback=None):
+        """Fast UTF-8 indexing using mmap.find() - optimized for huge files"""
         mm = self.mm
-        mm.seek(0)
-        self.index = [0]
-
-        while True:
-            pos = mm.tell()
-            line = mm.readline()
-            if not line:
+        total_size = len(mm)
+        
+        # Use array.array for fast integer storage (10-20x faster than list for millions of items)
+        self.index = array('Q', [0])
+        
+        # Use mmap.find() to scan for newlines
+        pos = 0
+        last_report = 0
+        report_interval = 50_000_000  # Report every 50MB for less overhead
+        
+        while pos < total_size:
+            # Report progress less frequently (every 50MB instead of 10MB)
+            if progress_callback and pos - last_report > report_interval:
+                last_report = pos
+                progress = pos / total_size
+                GLib.idle_add(progress_callback, progress)
+            
+            # Find next newline directly in mmap (fast C-level search)
+            newline_pos = mm.find(b'\n', pos)
+            
+            if newline_pos == -1:
+                # No more newlines
                 break
-            self.index.append(mm.tell())
+            
+            # Record position after the newline
+            pos = newline_pos + 1
+            self.index.append(pos)
+        
+        # Ensure file end is recorded
+        if not self.index or self.index[-1] != total_size:
+            self.index.append(total_size)
+        
+        if progress_callback:
+            GLib.idle_add(progress_callback, 1.0)
 
-    def _index_utf16(self):
-        raw = self.mm[:]
-        text = raw.decode(self.encoding, errors="replace")
-
-        self.index = [0]
-        byte_offset = 0
-        encoder = self.encoding
-
-        for ch in text:
-            ch_bytes = ch.encode(encoder, errors="replace")
-            byte_offset += len(ch_bytes)
-            if ch == "\n":
-                self.index.append(byte_offset)
-
-        if not self.index or self.index[-1] != len(raw):
-            self.index.append(len(raw))
-
-
+    def _index_utf16(self, progress_callback=None):
+        """Fast UTF-16 indexing using mmap.find() directly - no memory copies"""
+        mm = self.mm
+        total_size = len(mm)
+        
+        # Determine newline pattern based on endianness
+        if self.encoding == "utf-16le":
+            newline_bytes = b'\n\x00'  # UTF-16LE: \n = 0x0A 0x00
+        else:  # utf-16be
+            newline_bytes = b'\x00\n'  # UTF-16BE: \n = 0x00 0x0A
+        
+        # Check for BOM and set start position
+        start_pos = 0
+        if total_size >= 2:
+            first_two = mm[0:2]
+            if first_two in (b'\xff\xfe', b'\xfe\xff'):
+                start_pos = 2
+        
+        # Use array.array for fast integer storage
+        self.index = array('Q', [start_pos])
+        
+        # Use mmap.find() to scan for newlines
+        pos = start_pos
+        last_report = 0
+        report_interval = 50_000_000  # Report every 50MB for less overhead
+        
+        while pos < total_size:
+            # Report progress less frequently
+            if progress_callback and pos - last_report > report_interval:
+                last_report = pos
+                progress = pos / total_size
+                GLib.idle_add(progress_callback, progress)
+            
+            # Find next newline directly in mmap (no copy!)
+            newline_pos = mm.find(newline_bytes, pos)
+            
+            if newline_pos == -1:
+                # No more newlines
+                break
+            
+            # Record position after the newline (skip the 2-byte newline)
+            pos = newline_pos + 2
+            self.index.append(pos)
+        
+        # Ensure file end is recorded
+        if not self.index or self.index[-1] != total_size:
+            self.index.append(total_size)
+        
+        if progress_callback:
+            GLib.idle_add(progress_callback, 1.0)
 
     def total_lines(self):
         return len(self.index) - 1
@@ -274,19 +350,22 @@ class Renderer:
     def __init__(self):
         self.font = Pango.FontDescription("Monospace 12")
 
-        # Calculate actual line height from font metrics
-        # Create a temporary surface to get font metrics
+        # Correct GTK4/Pango method to compute line height:
+        # Use logical extents, not ink extents.
         surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
         cr = cairo.Context(surface)
+
         layout = PangoCairo.create_layout(cr)
         layout.set_font_description(self.font)
-        layout.set_text("Ay", -1)  # Use tall chars to get full height
-        _, text_height = layout.get_pixel_size()
-        
-        self.text_h = text_height  # Actual text height (for cursor)
-        self.line_h = text_height - 0  # Line height with spacing
+        layout.set_text("Ag", -1)  # Reliable glyph pair for height
 
-        # Clear semantic names
+        ink_rect, logical_rect = layout.get_pixel_extents()
+
+        # These are the correct text and line heights
+        self.text_h = logical_rect.height
+        self.line_h = self.text_h
+
+        # Colors unchanged
         self.editor_background_color = (0.10, 0.10, 0.10)
         self.text_foreground_color   = (0.50, 0.50, 0.50)
         self.linenumber_foreground_color = (0.60, 0.60, 0.60)
@@ -308,7 +387,9 @@ class Renderer:
         width = self.get_text_width(cr, max_line_num)
         return width + 15  # Add padding (5px left + 10px right margin)
 
-    def draw(self, cr, alloc, buf, scroll_line, scroll_x, cursor_visible=True):
+    def draw(self, cr, alloc, buf, scroll_line, scroll_x,
+         cursor_visible=True, cursor_phase=0.0):
+
         # Background
         cr.set_source_rgb(*self.editor_background_color)
         cr.paint()
@@ -353,9 +434,18 @@ class Renderer:
                 text_width = self.get_text_width(cr, text_before_cursor)
                 
                 cx = ln_width + text_width - scroll_x
-                cr.set_source_rgb(1, 1, 1)
-                cr.rectangle(cx, cy, 1, self.text_h)  # Use text_h instead of line_h
-                cr.fill()
+                # Smooth fade: opacity controlled by view.cursor_phase
+                opacity = 1.0 - abs(cursor_phase - 1.0)
+
+
+                cr.set_source_rgba(1, 1, 1, opacity)
+
+                cr.set_line_width(0.8)
+                cr.move_to(cx + 0.4, cy)
+                cr.line_to(cx + 0.4, cy + self.text_h)
+                cr.stroke()
+
+
 
 # ============================================================
 #   VIEW
@@ -398,38 +488,77 @@ class VirtualTextView(Gtk.DrawingArea):
         self.add_controller(focus)
         
         # Cursor blink state
+        # Cursor blink state (smooth fade)
         self.cursor_visible = True
         self.cursor_blink_timeout = None
+
+        # ✨ MUST be set before start_cursor_blink()
+        self.cursor_phase = 0.0           # animation phase 0 → 2
+        self.cursor_fade_speed = 0.03     # 0.02 ~ 50fps smooth fade
+
         self.start_cursor_blink()
-    
+
     def start_cursor_blink(self):
-        """Start cursor blinking animation"""
         def blink():
-            self.cursor_visible = not self.cursor_visible
+            # Move the cursor phase forward.
+            # Range 0 → 1 → 0 → 1, forming a triangle wave.
+            self.cursor_phase += self.cursor_fade_speed
+            if self.cursor_phase >= 2.0:
+                self.cursor_phase -= 2.0
+
             self.queue_draw()
-            return True  # Continue blinking
-        
+            return True  # keep ticking
+
         if self.cursor_blink_timeout:
             GLib.source_remove(self.cursor_blink_timeout)
-        
-        self.cursor_blink_timeout = GLib.timeout_add(500, blink)  # Blink every 500ms
+
+        # Run blink at ~50fps (20ms)
+        self.cursor_blink_timeout = GLib.timeout_add(20, blink)
+
 
     def stop_cursor_blink(self):
-        """Stop cursor blinking"""
         if self.cursor_blink_timeout:
             GLib.source_remove(self.cursor_blink_timeout)
             self.cursor_blink_timeout = None
+
         self.cursor_visible = True
+        self.cursor_phase = 1.0   # ← force full opacity, not 0.0
+        self.queue_draw()
+
+
 
     def on_commit(self, im, text):
-        """Handle committed text from IM"""
+        """Handle committed text from IM (finished composition)"""
         if text:
+            # Insert typed text
             self.buf.insert_text(text)
+
+            # Keep cursor on screen
             self.keep_cursor_visible()
-            self.cursor_visible = True  # Reset blink on typing
-            self.start_cursor_blink()
+
+            # While typing → cursor MUST be solid
+            self.cursor_visible = True
+            self.cursor_phase = 0.0     # brightest point of fade
+
+            # Stop any blinking while typing
+            self.stop_cursor_blink()
+
+            # Blink will resume after user stops typing
+            self.restart_blink_after_idle()
+
+            # Redraw + update IME
             self.queue_draw()
             self.update_im_cursor_location()
+
+
+    def restart_blink_after_idle(self):
+        def idle_blink():
+            self.start_cursor_blink()
+            return False  # one-shot
+        GLib.timeout_add(700, idle_blink)  # restart after 700ms idle
+
+
+
 
     def on_preedit_start(self, im):
         """Preedit (composition) started"""
@@ -464,9 +593,11 @@ class VirtualTextView(Gtk.DrawingArea):
     def update_im_cursor_location(self):
         """Tell IM where to display composition window"""
         try:
-            # Get actual allocation
-            alloc = self.get_allocation()
-            if alloc.width <= 0 or alloc.height <= 0:
+            # Use get_width() and get_height() instead of get_allocation() - GTK4 way
+            width = self.get_width()
+            height = self.get_height()
+            
+            if width <= 0 or height <= 0:
                 return
                 
             cl, cc = self.buf.cursor_line, self.buf.cursor_col
@@ -489,8 +620,8 @@ class VirtualTextView(Gtk.DrawingArea):
             x = ln_width + text_width - self.scroll_x
             
             # Clamp to visible area
-            x = max(ln_width, min(x, alloc.width - 50))
-            y = max(0, min(y, alloc.height - self.renderer.text_h))
+            x = max(ln_width, min(x, width - 50))
+            y = max(0, min(y, height - self.renderer.text_h))
             
             # Create cursor rectangle
             rect = Gdk.Rectangle()
@@ -636,6 +767,7 @@ class VirtualTextView(Gtk.DrawingArea):
         self.queue_draw()
 
     def keep_cursor_visible(self):
+        # Use get_height() instead of get_allocated_height() - GTK4 way
         max_vis = max(1, (self.get_height() // self.renderer.line_h) + 1)
 
         cl = self.buf.cursor_line
@@ -660,7 +792,8 @@ class VirtualTextView(Gtk.DrawingArea):
 
     def on_scroll(self, c, dx, dy):
         total = self.buf.total()
-        max_vis = max(1, (self.get_allocated_height() // self.renderer.line_h) + 1)
+        # Use get_height() instead of get_allocated_height() - GTK4 way
+        max_vis = max(1, (self.get_height() // self.renderer.line_h) + 1)
         max_scroll = max(0, total - max_vis)
 
         if dy:
@@ -689,8 +822,10 @@ class VirtualTextView(Gtk.DrawingArea):
             self.buf,
             self.scroll_line,
             self.scroll_x,
-            self.cursor_visible  # Pass cursor visibility state
+            self.cursor_visible,
+            self.cursor_phase   # NEW
         )
+
 
 
 # ============================================================
@@ -726,11 +861,23 @@ class VirtualScrollbar(Gtk.DrawingArea):
         view = self.view
         total = view.buf.total()
 
+        # Visible lines
         max_vis = max(1, (view.get_height() // view.renderer.line_h) + 1)
+
+        # How many lines we can scroll
         max_scroll = max(0, total - max_vis)
 
+        # Thumb height stays the same
         thumb_h = max(20, h * (max_vis / total))
-        pos = 0 if max_scroll == 0 else (view.scroll_line / max_scroll)
+
+        # ✨ Corrected thumb position math
+        if max_scroll <= 0:
+            pos = 0.0
+        else:
+            # Scroll proportion based on remaining scrollable lines
+            pos = view.scroll_line / max_scroll
+
+        pos = max(0.0, min(1.0, pos))  # clamp
         y = pos * (h - thumb_h)
 
         cr.set_source_rgb(0.55, 0.55, 0.55)
@@ -747,9 +894,9 @@ class VirtualScrollbar(Gtk.DrawingArea):
             return
 
         view = self.view
-        h = self.get_allocated_height()
+        h = self.get_height()  # GTK4: use get_height() instead of get_allocated_height()
         total = view.buf.total()
-        max_vis = max(1, view.get_allocated_height() // view.renderer.line_h)
+        max_vis = max(1, view.get_height() // view.renderer.line_h)
         max_scroll = max(0, total - max_vis)
 
         thumb_h = max(20, h * (max_vis / total))
@@ -763,13 +910,50 @@ class VirtualScrollbar(Gtk.DrawingArea):
 
 
 # ============================================================
+#   LOADING DIALOG
+# ============================================================
+
+class LoadingDialog(Adw.Window):
+    def __init__(self, parent):
+        super().__init__()
+        self.set_transient_for(parent)
+        self.set_modal(True)
+        self.set_default_size(300, 150)
+        self.set_title("Loading File")
+        
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        box.set_margin_top(24)
+        box.set_margin_bottom(24)
+        box.set_margin_start(24)
+        box.set_margin_end(24)
+        
+        self.label = Gtk.Label(label="Indexing file...")
+        box.append(self.label)
+        
+        self.progress = Gtk.ProgressBar()
+        self.progress.set_show_text(True)
+        box.append(self.progress)
+        
+        spinner = Gtk.Spinner()
+        spinner.start()
+        box.append(spinner)
+        
+        self.set_content(box)
+    
+    def update_progress(self, fraction):
+        """Update progress bar (must be called from main thread)"""
+        self.progress.set_fraction(fraction)
+        self.progress.set_text(f"{int(fraction * 100)}%")
+
+
+# ============================================================
 #   WINDOW
 # ============================================================
 
 class EditorWindow(Adw.ApplicationWindow):
     def __init__(self, app):
         super().__init__(application=app)
-        self.set_title("Virutal Text Editor")
+        self.set_title("Virtual Text Editor")
         self.set_default_size(1000, 700)
 
         self.buf = VirtualBuffer()
@@ -801,16 +985,49 @@ class EditorWindow(Adw.ApplicationWindow):
             except:
                 return
             path = f.get_path()
-
+            
+            # Show loading dialog
+            loading_dialog = LoadingDialog(self)
+            loading_dialog.present()
+            
+            # Create indexed file
             idx = IndexedFile(path)
-            self.buf.load(idx)
-            self.view.scroll_line = 0
-            self.view.scroll_x = 0
-
-            self.view.queue_draw()
-            self.scrollbar.queue_draw()
-
-            self.set_title(os.path.basename(path))
+            
+            def progress_callback(fraction):
+                """Update progress (called from worker thread via GLib.idle_add)"""
+                loading_dialog.update_progress(fraction)
+                return False  # Don't repeat
+            
+            def index_complete():
+                """Called when indexing is done"""
+                # Load the indexed file into buffer
+                self.buf.load(idx)
+                self.view.scroll_line = 0
+                self.view.scroll_x = 0
+                
+                self.view.queue_draw()
+                self.scrollbar.queue_draw()
+                
+                self.set_title(os.path.basename(path))
+                
+                # Close loading dialog
+                loading_dialog.close()
+                return False  # Don't repeat
+            
+            def index_in_thread():
+                """Run indexing in background thread"""
+                try:
+                    idx.index_file(progress_callback)
+                    # Schedule completion on main thread
+                    GLib.idle_add(index_complete)
+                except Exception as e:
+                    print(f"Error indexing file: {e}")
+                    GLib.idle_add(loading_dialog.close)
+            
+            # Start indexing in background thread
+            thread = Thread(target=index_in_thread)
+            thread.daemon = True
+            thread.start()
 
         dialog.open(self, None, done)
 
