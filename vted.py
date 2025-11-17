@@ -2,7 +2,7 @@
 import sys, os, mmap, gi, cairo, time
 from threading import Thread
 from array import array
-
+import math
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 
@@ -388,7 +388,9 @@ class Renderer:
         return width + 15  # Add padding (5px left + 10px right margin)
 
     def draw(self, cr, alloc, buf, scroll_line, scroll_x,
-         cursor_visible=True, cursor_phase=0.0):
+            cursor_visible=True, cursor_phase=0.0):
+
+        import math  # for cosine fade
 
         # Background
         cr.set_source_rgb(*self.editor_background_color)
@@ -398,10 +400,8 @@ class Renderer:
         layout.set_font_description(self.font)
 
         total = buf.total()
-        
-        # Calculate line number width dynamically
         ln_width = self.calculate_line_number_width(cr, total)
-        
+
         max_vis = (alloc.height // self.line_h) + 1
 
         y = 0
@@ -422,28 +422,61 @@ class Renderer:
 
             y += self.line_h
 
-        # Cursor - only draw if visible (for blinking)
-        if cursor_visible:
-            cl, cc = buf.cursor_line, buf.cursor_col
-            if scroll_line <= cl < scroll_line + max_vis:
-                cy = (cl - scroll_line) * self.line_h
-                
-                # Get text before cursor and measure it
-                line_text = buf.get_line(cl)
-                text_before_cursor = line_text[:cc]
-                text_width = self.get_text_width(cr, text_before_cursor)
-                
-                cx = ln_width + text_width - scroll_x
-                # Smooth fade: opacity controlled by view.cursor_phase
-                opacity = 1.0 - abs(cursor_phase - 1.0)
+        cl, cc = buf.cursor_line, buf.cursor_col
+        line_visible = scroll_line <= cl < scroll_line + max_vis
 
+        # --- PREEDIT DRAWING -----------------------------------
+        if hasattr(buf, "preedit_string") and buf.preedit_string and line_visible:
+            py = (cl - scroll_line) * self.line_h
 
-                cr.set_source_rgba(1, 1, 1, opacity)
+            pre_line = buf.get_line(cl)
+            pre_before = pre_line[:cc]
 
-                cr.set_line_width(0.8)
-                cr.move_to(cx + 0.4, cy)
-                cr.line_to(cx + 0.4, cy + self.text_h)
+            tw = self.get_text_width(cr, pre_before)
+            px = ln_width + tw - scroll_x
+
+            # preedit text
+            layout.set_text(buf.preedit_string, -1)
+            cr.set_source_rgba(1, 1, 1, 0.7)
+            cr.move_to(px, py)
+            PangoCairo.show_layout(cr, layout)
+
+            # underline
+            uw = self.get_text_width(cr, buf.preedit_string)
+            cr.set_source_rgba(1, 1, 1, 0.7)
+            cr.set_line_width(1.0)
+            cr.move_to(px, py + self.text_h)
+            cr.line_to(px + uw, py + self.text_h)
+            cr.stroke()
+
+            # preedit cursor
+            if hasattr(buf, "preedit_cursor"):
+                pc = buf.preedit_cursor
+                cw = self.get_text_width(cr, buf.preedit_string[:pc])
+                cr.set_line_width(1.0)
+                cr.move_to(px + cw, py)
+                cr.line_to(px + cw, py + self.text_h)
                 cr.stroke()
+
+        # --- DRAW NORMAL CURSOR (with cosine fade) -------------
+        if cursor_visible and line_visible:
+            line_text = buf.get_line(cl)
+            before = line_text[:cc]
+
+            text_w = self.get_text_width(cr, before)
+            cy = (cl - scroll_line) * self.line_h
+            cx = ln_width + text_w - scroll_x
+
+            # cosine fade: 0→1→0 smooth
+            opacity = 0.5 + 0.5 * math.cos(cursor_phase * math.pi)
+            opacity = max(0.0, min(1.0, opacity))
+
+            cr.set_source_rgba(1, 1, 1, opacity)
+            cr.set_line_width(0.8)
+            cr.move_to(cx + 0.4, cy)
+            cr.line_to(cx + 0.4, cy + self.text_h)
+            cr.stroke()
+
 
 
 
@@ -498,21 +531,34 @@ class VirtualTextView(Gtk.DrawingArea):
 
         self.start_cursor_blink()
 
+    def pixel_to_column(self, cr, text, px):
+        """Binary search: convert pixel-x → UTF-8 column index."""
+        low, high = 0, len(text)
+        while low < high:
+            mid = (low + high) // 2
+            w = self.renderer.get_text_width(cr, text[:mid])
+            if w < px:
+                low = mid + 1
+            else:
+                high = mid
+        return max(0, min(low, len(text)))
+
+
     def start_cursor_blink(self):
+        # Always start blinking from fully visible
+        self.cursor_phase = 0.0
+
         def blink():
-            # Move the cursor phase forward.
-            # Range 0 → 1 → 0 → 1, forming a triangle wave.
             self.cursor_phase += self.cursor_fade_speed
             if self.cursor_phase >= 2.0:
                 self.cursor_phase -= 2.0
 
             self.queue_draw()
-            return True  # keep ticking
+            return True
 
         if self.cursor_blink_timeout:
             GLib.source_remove(self.cursor_blink_timeout)
 
-        # Run blink at ~50fps (20ms)
         self.cursor_blink_timeout = GLib.timeout_add(20, blink)
 
 
@@ -522,7 +568,7 @@ class VirtualTextView(Gtk.DrawingArea):
             self.cursor_blink_timeout = None
 
         self.cursor_visible = True
-        self.cursor_phase = 1.0   # ← force full opacity, not 0.0
+        self.cursor_phase = 0.0   # NOT 1.0
         self.queue_draw()
 
 
@@ -591,48 +637,44 @@ class VirtualTextView(Gtk.DrawingArea):
         self.im.focus_out()
 
     def update_im_cursor_location(self):
-        """Tell IM where to display composition window"""
         try:
-            # Use get_width() and get_height() instead of get_allocation() - GTK4 way
-            width = self.get_width()
+            width  = self.get_width()
             height = self.get_height()
-            
             if width <= 0 or height <= 0:
                 return
-                
+
             cl, cc = self.buf.cursor_line, self.buf.cursor_col
-            
-            # Get the actual line text up to cursor
             line_text = self.buf.get_line(cl)
-            text_before_cursor = line_text[:cc]
-            
-            # Measure actual text width using Pango
+            before = line_text[:cc]
+
+            # Pango measurement context
             surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
             cr = cairo.Context(surface)
-            
-            text_width = self.renderer.get_text_width(cr, text_before_cursor)
-            
-            # Calculate line number width dynamically
-            ln_width = self.renderer.calculate_line_number_width(cr, self.buf.total())
-            
-            # Calculate screen position
+
+            text_w = self.renderer.get_text_width(cr, before)
+            ln_w   = self.renderer.calculate_line_number_width(cr, self.buf.total())
+
             y = (cl - self.scroll_line) * self.renderer.line_h
-            x = ln_width + text_width - self.scroll_x
-            
-            # Clamp to visible area
-            x = max(ln_width, min(x, width - 50))
-            y = max(0, min(y, height - self.renderer.text_h))
-            
-            # Create cursor rectangle
+            x = ln_w + text_w - self.scroll_x
+
+            # clamp to safe visible region
+            if y < 0 or y > height - self.renderer.text_h:
+                return
+
+            x = max(ln_w, min(x, width - 50))
+            y = max(0,     min(y, height - self.renderer.text_h))
+
             rect = Gdk.Rectangle()
             rect.x = int(x)
             rect.y = int(y)
-            rect.width = 2
-            rect.height = self.renderer.text_h  # Use text_h instead of line_h
-            
+            rect.width  = 2
+            rect.height = self.renderer.text_h
+
             self.im.set_cursor_location(rect)
+
         except Exception as e:
             print(f"IM cursor location error: {e}")
+
                 
     def on_key(self, c, keyval, keycode, state):
         # Let IM filter the event FIRST
@@ -710,29 +752,25 @@ class VirtualTextView(Gtk.DrawingArea):
 
     def on_click(self, g, n, x, y):
         self.grab_focus()
-        
-        # Calculate line number width dynamically
+
+        # Temporary Pango context
         surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
         cr = cairo.Context(surface)
+
         ln_width = self.renderer.calculate_line_number_width(cr, self.buf.total())
-        
+
         ln = self.scroll_line + int(y // self.renderer.line_h)
         ln = max(0, min(ln, self.buf.total() - 1))
 
         col_pixels = x - ln_width + self.scroll_x
-        if col_pixels < 0:
-            col = 0
-        else:
-            line_text = self.buf.get_line(ln)
-            # Binary search to find column from pixel position
-            col = 0
-            for i in range(len(line_text) + 1):
-                text_width = self.renderer.get_text_width(cr, line_text[:i])
-                if text_width > col_pixels:
-                    break
-                col = i
-        
-        col = max(0, min(col, len(self.buf.get_line(ln))))
+        col_pixels = max(0, col_pixels)
+
+        text = self.buf.get_line(ln)
+
+        # Binary search → column index
+        col = self.pixel_to_column(cr, text, col_pixels)
+
+        col = max(0, min(col, len(text)))
         self.ctrl.click(ln, col)
         self.queue_draw()
 
@@ -767,20 +805,38 @@ class VirtualTextView(Gtk.DrawingArea):
         self.queue_draw()
 
     def keep_cursor_visible(self):
-        # Use get_height() instead of get_allocated_height() - GTK4 way
+        # vertical scroll
         max_vis = max(1, (self.get_height() // self.renderer.line_h) + 1)
-
         cl = self.buf.cursor_line
+
         if cl < self.scroll_line:
             self.scroll_line = cl
         elif cl >= self.scroll_line + max_vis:
             self.scroll_line = cl - max_vis + 1
 
-        if self.scroll_line < 0:
-            self.scroll_line = 0
-
-
         self.scroll_line = max(0, self.scroll_line)
+
+        # horizontal scroll
+        surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
+        cr = cairo.Context(surface)
+
+        line_text = self.buf.get_line(self.buf.cursor_line)
+        text_before_cursor = line_text[:self.buf.cursor_col]
+
+        text_w = self.renderer.get_text_width(cr, text_before_cursor)
+        ln_w   = self.renderer.calculate_line_number_width(cr, self.buf.total())
+
+        cursor_x = ln_w + text_w
+
+        view_w = self.get_width()
+        left   = self.scroll_x
+        right  = self.scroll_x + view_w - 30   # padding
+
+        if cursor_x < left:
+            self.scroll_x = max(0, cursor_x - 20)
+        elif cursor_x > right:
+            self.scroll_x = cursor_x - (view_w - 30) + 20
+
 
     def install_scroll(self):
         sc = Gtk.EventControllerScroll.new(
