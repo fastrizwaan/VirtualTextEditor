@@ -441,18 +441,9 @@ class Renderer:
             ink, logical = layout.get_pixel_extents()
             text_w = logical.width
 
-            # FIXED: For RTL text, don't shift the base_x as text grows
-            # Instead, calculate the position based on the available width
             if is_rtl:
                 available = max(0, alloc.width - ln_width)
-                # When scrolling is 0, align to the right edge
-                # When scrolling, keep the position stable
-                if scroll_x == 0:
-                    # Align to right edge of available space
-                    base_x = ln_width + max(0, available - text_w)
-                else:
-                    # Use a fixed position when scrolling
-                    base_x = ln_width + available - scroll_x
+                base_x = ln_width + max(0, available - text_w) - scroll_x
             else:
                 base_x = ln_width - scroll_x
 
@@ -481,10 +472,7 @@ class Renderer:
 
             if is_rtl:
                 available = max(0, alloc.width - ln_width)
-                if scroll_x == 0:
-                    base_x = ln_width + max(0, available - text_w)
-                else:
-                    base_x = ln_width + available - scroll_x
+                base_x = ln_width + max(0, available - text_w) - scroll_x
             else:
                 base_x = ln_width - scroll_x
 
@@ -539,10 +527,7 @@ class Renderer:
 
             if is_rtl:
                 available = max(0, alloc.width - ln_width)
-                if scroll_x == 0:
-                    base_x = ln_width + max(0, available - text_w)
-                else:
-                    base_x = ln_width + available - scroll_x
+                base_x = ln_width + max(0, available - text_w) - scroll_x
             else:
                 base_x = ln_width - scroll_x
 
@@ -780,10 +765,7 @@ class VirtualTextView(Gtk.DrawingArea):
             # base_x matches draw()
             if is_rtl:
                 available = max(0, width - ln_w)
-                if self.scroll_x == 0:
-                    base_x = ln_w + max(0, available - text_w)
-                else:
-                    base_x = ln_w + available - self.scroll_x
+                base_x = ln_w + max(0, available - text_w) - self.scroll_x
             else:
                 base_x = ln_w - self.scroll_x
 
@@ -958,7 +940,8 @@ class VirtualTextView(Gtk.DrawingArea):
 
         self.scroll_line = max(0, self.scroll_line)
 
-        # ---- FIXED horizontal scroll for RTL ----
+        # ---- horizontal scroll using correct bidi cursor ----
+
         surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
         cr = cairo.Context(surface)
 
@@ -983,52 +966,27 @@ class VirtualTextView(Gtk.DrawingArea):
         ln_w = self.renderer.calculate_line_number_width(cr, self.buf.total())
         view_w = self.get_width()
 
-        # Get cursor position
+        if is_rtl:
+            available = max(0, view_w - ln_w)
+            base_x = ln_w + max(0, available - text_w) - self.scroll_x
+        else:
+            base_x = ln_w - self.scroll_x
+
+        # ---- FIX: correct UTF-8 → visual cluster byte-index ----
         byte_index = self.visual_byte_index(line_text, self.buf.cursor_col)
+
         strong_pos, weak_pos = layout.get_cursor_pos(byte_index)
         cursor_offset = strong_pos.x // Pango.SCALE
 
-        if is_rtl:
-            # For RTL text, we need to handle scrolling differently
-            available = max(0, view_w - ln_w)
-            
-            # Only adjust scroll if cursor is going out of view
-            if self.scroll_x == 0 and text_w <= available:
-                # Text fits in view, no scrolling needed
-                pass
-            else:
-                # Calculate the actual cursor position on screen
-                if self.scroll_x == 0:
-                    base_x = ln_w + max(0, available - text_w)
-                else:
-                    base_x = ln_w + available - self.scroll_x
-                
-                cursor_x = base_x + cursor_offset
-                
-                # Adjust scroll only if cursor is out of visible area
-                visible_left = ln_w + 20
-                visible_right = view_w - 30
-                
-                if cursor_x < visible_left:
-                    # Cursor is too far left, scroll right (decrease scroll_x)
-                    delta = visible_left - cursor_x
-                    self.scroll_x = max(0, self.scroll_x - delta)
-                elif cursor_x > visible_right:
-                    # Cursor is too far right, scroll left (increase scroll_x)
-                    delta = cursor_x - visible_right
-                    self.scroll_x = self.scroll_x + delta
-        else:
-            # LTR text - standard scrolling
-            base_x = ln_w - self.scroll_x
-            cursor_x = base_x + cursor_offset
+        cursor_x = base_x + cursor_offset
 
-            left = ln_w + 20
-            right = view_w - 30
+        left   = self.scroll_x
+        right  = self.scroll_x + view_w - 30
 
-            if cursor_x < left:
-                self.scroll_x = max(0, cursor_offset - 20)
-            elif cursor_x > right:
-                self.scroll_x = cursor_offset - (view_w - ln_w - 50)
+        if cursor_x < left:
+            self.scroll_x = max(0, cursor_x - 20)
+        elif cursor_x > right:
+            self.scroll_x = cursor_x - (view_w - 30) + 20
 
 
     def install_scroll(self):
@@ -1041,6 +999,7 @@ class VirtualTextView(Gtk.DrawingArea):
 
     def on_scroll(self, c, dx, dy):
         total = self.buf.total()
+        # Use get_height() instead of get_allocated_height() - GTK4 way
         max_vis = max(1, (self.get_height() // self.renderer.line_h) + 1)
         max_scroll = max(0, total - max_vis)
 
