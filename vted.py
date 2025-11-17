@@ -1790,7 +1790,7 @@ class VirtualTextView(Gtk.DrawingArea):
         import unicodedata
 
         # vertical scrolling (unchanged)
-        max_vis = max(1, (self.get_height() // self.renderer.line_h) + 1)
+        max_vis = max(1, self.get_height() // self.renderer.line_h)
         cl = self.buf.cursor_line
 
         if cl < self.scroll_line:
@@ -1883,8 +1883,9 @@ class VirtualTextView(Gtk.DrawingArea):
 
     def on_scroll(self, c, dx, dy):
         total = self.buf.total()
-        max_vis = max(1, (self.get_height() // self.renderer.line_h) + 1)
+        max_vis = max(1, self.get_height() // self.renderer.line_h)
         max_scroll = max(0, total - max_vis)
+
 
         if dy:
             self.scroll_line = max(
@@ -1951,28 +1952,32 @@ class VirtualScrollbar(Gtk.DrawingArea):
         view = self.view
         total = view.buf.total()
 
-        # Visible lines
-        max_vis = max(1, (view.get_height() // view.renderer.line_h) + 1)
+        # Visible lines (scrolling logic, no +1)
+        max_vis = max(1, view.get_height() // view.renderer.line_h)
 
         # How many lines we can scroll
         max_scroll = max(0, total - max_vis)
 
-        # Thumb height stays the same
-        thumb_h = max(20, h * (max_vis / total))
+        # Thumb height proportional, clamped correctly
+        if total <= 0:
+            thumb_h = h
+        else:
+            thumb_h = h * (max_vis / total)
+            thumb_h = max(20, min(h, thumb_h))
 
-        # ✨ Corrected thumb position math
+        # Position
         if max_scroll <= 0:
             pos = 0.0
         else:
-            # Scroll proportion based on remaining scrollable lines
             pos = view.scroll_line / max_scroll
 
-        pos = max(0.0, min(1.0, pos))  # clamp
+        pos = max(0.0, min(1.0, pos))
         y = pos * (h - thumb_h)
 
         cr.set_source_rgb(0.55, 0.55, 0.55)
         cr.rectangle(0, y, w, thumb_h)
         cr.fill()
+
 
 
     def on_click(self, g, n_press, x, y):
