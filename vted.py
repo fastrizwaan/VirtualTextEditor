@@ -502,6 +502,7 @@ class VirtualBuffer(GObject.Object):
         start_line, start_col, end_line, end_col = self.selection.get_bounds()
         
         if start_line == end_line:
+            # Single line selection
             line = self.get_line(start_line)
             new_line = line[:start_col] + line[end_col:]
             
@@ -510,37 +511,73 @@ class VirtualBuffer(GObject.Object):
             else:
                 self.edits[start_line] = new_line
         else:
+            # Multi-line selection
             first_line = self.get_line(start_line)
             last_line = self.get_line(end_line)
             new_line = first_line[:start_col] + last_line[end_col:]
             
-            # Mark middle lines as deleted
-            for ln in range(start_line + 1, end_line + 1):
-                if ln in self.inserted_lines:
-                    del self.inserted_lines[ln]
+            # Calculate number of lines being deleted
+            lines_deleted = end_line - start_line
+            
+            # Shift down all virtual lines above the deleted range
+            new_ins = {}
+            for k, v in self.inserted_lines.items():
+                if k < start_line:
+                    new_ins[k] = v
+                elif k == start_line:
+                    # This will be set below
+                    pass
+                elif k <= end_line:
+                    # Skip deleted lines
+                    pass
                 else:
-                    self.deleted_lines.add(ln)
-                
-                if ln in self.edits:
-                    del self.edits[ln]
+                    # Shift down
+                    new_ins[k - lines_deleted] = v
+            
+            new_ed = {}
+            for k, v in self.edits.items():
+                if k < start_line:
+                    new_ed[k] = v
+                elif k == start_line:
+                    # This will be set below
+                    pass
+                elif k <= end_line:
+                    # Skip deleted lines
+                    pass
+                else:
+                    # Shift down
+                    new_ed[k - lines_deleted] = v
+            
+            new_del = set()
+            for k in self.deleted_lines:
+                if k < start_line:
+                    new_del.add(k)
+                elif k <= end_line:
+                    # Skip deleted lines
+                    pass
+                else:
+                    # Shift down
+                    new_del.add(k - lines_deleted)
             
             # Set the merged line
             if start_line in self.inserted_lines:
-                self.inserted_lines[start_line] = new_line
+                new_ins[start_line] = new_line
             else:
-                self.edits[start_line] = new_line
+                new_ed[start_line] = new_line
             
-            # Track offset change (deleted lines)
-            lines_deleted = end_line - start_line
-            self._add_offset(end_line + 1, -lines_deleted)
+            self.inserted_lines = new_ins
+            self.edits = new_ed
+            self.deleted_lines = new_del
+            
+            # Update line offsets
+            self._add_offset(start_line + 1, -lines_deleted)
         
         self.cursor_line = start_line
         self.cursor_col = start_col
         self.selection.clear()
         self.emit("changed")
-        
-
         return True
+
 
     def insert_text(self, text):
         # If there's a selection, delete it first
@@ -567,8 +604,6 @@ class VirtualBuffer(GObject.Object):
 
             self.cursor_col += len(text)
             self.emit("changed")
-            
-
             return
 
         # ------------------------------------------------------------
@@ -582,24 +617,45 @@ class VirtualBuffer(GObject.Object):
         left_part  = old[:col] + first
         right_part = last + old[col:]
 
-        # Update current line with left_part
-        if ln in self.inserted_lines:
-            self.inserted_lines[ln] = left_part
-        else:
-            self.edits[ln] = left_part
+        # Number of new lines being inserted
+        lines_to_insert = len(parts) - 1
 
-        # Shift only virtual lines (inserted/edited/deleted)
+        # Shift up all virtual lines after current line
         new_ins = {}
         for k, v in self.inserted_lines.items():
-            new_ins[k if k <= ln else k+len(parts)-1] = v
+            if k < ln:
+                new_ins[k] = v
+            elif k == ln:
+                # This will be set below
+                pass
+            else:
+                # Shift up
+                new_ins[k + lines_to_insert] = v
 
         new_ed = {}
         for k, v in self.edits.items():
-            new_ed[k if k <= ln else k+len(parts)-1] = v
+            if k < ln:
+                new_ed[k] = v
+            elif k == ln:
+                # This will be set below
+                pass
+            else:
+                # Shift up
+                new_ed[k + lines_to_insert] = v
 
         new_del = set()
         for k in self.deleted_lines:
-            new_del.add(k if k <= ln else k+len(parts)-1)
+            if k <= ln:
+                new_del.add(k)
+            else:
+                # Shift up
+                new_del.add(k + lines_to_insert)
+
+        # Update current line with left part
+        if ln in self.inserted_lines:
+            new_ins[ln] = left_part
+        else:
+            new_ed[ln] = left_part
 
         # Insert the middle lines
         cur = ln
@@ -608,7 +664,7 @@ class VirtualBuffer(GObject.Object):
             new_ins[cur] = m
 
         # Insert last line (right fragment)
-        new_ins[ln + len(parts) - 1] = right_part
+        new_ins[ln + lines_to_insert] = right_part
 
         # Apply dicts
         self.inserted_lines = new_ins
@@ -616,15 +672,14 @@ class VirtualBuffer(GObject.Object):
         self.deleted_lines = new_del
 
         # Offset update (insert count = len(parts)-1)
-        self._add_offset(ln + 1, len(parts) - 1)
+        self._add_offset(ln + 1, lines_to_insert)
 
         # Final cursor
-        self.cursor_line = ln + len(parts) - 1
+        self.cursor_line = ln + lines_to_insert
         self.cursor_col  = len(last)
 
         self.selection.clear()
         self.emit("changed")
-        
 
 
 
@@ -638,22 +693,54 @@ class VirtualBuffer(GObject.Object):
         col = self.cursor_col
 
         if col == 0:
+            # Deleting at start of line - merge with previous line
             if ln > 0:
                 prev_line = self.get_line(ln - 1)
                 new_line = prev_line + line
                 
+                # Update previous line with merged content
                 if ln - 1 in self.inserted_lines:
                     self.inserted_lines[ln - 1] = new_line
                 else:
                     self.edits[ln - 1] = new_line
                 
-                if ln in self.inserted_lines:
-                    del self.inserted_lines[ln]
-                else:
-                    self.deleted_lines.add(ln)
+                # Shift down all virtual lines after current line
+                new_ins = {}
+                for k, v in self.inserted_lines.items():
+                    if k < ln:
+                        new_ins[k] = v
+                    elif k == ln:
+                        # Skip - this line is being deleted
+                        pass
+                    else:
+                        # Shift down by 1
+                        new_ins[k - 1] = v
                 
-                if ln in self.edits:
-                    del self.edits[ln]
+                new_ed = {}
+                for k, v in self.edits.items():
+                    if k < ln:
+                        new_ed[k] = v
+                    elif k == ln:
+                        # Skip - this line is being deleted
+                        pass
+                    else:
+                        # Shift down by 1
+                        new_ed[k - 1] = v
+                
+                new_del = set()
+                for k in self.deleted_lines:
+                    if k < ln:
+                        new_del.add(k)
+                    elif k == ln:
+                        # Skip - already being deleted
+                        pass
+                    else:
+                        # Shift down by 1
+                        new_del.add(k - 1)
+                
+                self.inserted_lines = new_ins
+                self.edits = new_ed
+                self.deleted_lines = new_del
                 
                 # Track offset change (1 line deleted)
                 self._add_offset(ln + 1, -1)
@@ -661,6 +748,7 @@ class VirtualBuffer(GObject.Object):
                 self.cursor_line = ln - 1
                 self.cursor_col = len(prev_line)
         else:
+            # Normal backspace within a line
             new_line = line[:col-1] + line[col:]
             
             if ln in self.inserted_lines:
@@ -686,26 +774,59 @@ class VirtualBuffer(GObject.Object):
         col = self.cursor_col
         
         if col >= len(line):
+            # At end of line - merge with next line
             if ln < self.total() - 1:
                 next_line = self.get_line(ln + 1)
                 new_line = line + next_line
                 
+                # Update current line with merged content
                 if ln in self.inserted_lines:
                     self.inserted_lines[ln] = new_line
                 else:
                     self.edits[ln] = new_line
                 
-                if ln + 1 in self.inserted_lines:
-                    del self.inserted_lines[ln + 1]
-                else:
-                    self.deleted_lines.add(ln + 1)
+                # Shift down all virtual lines after next line
+                new_ins = {}
+                for k, v in self.inserted_lines.items():
+                    if k <= ln:
+                        new_ins[k] = v
+                    elif k == ln + 1:
+                        # Skip - this line is being deleted
+                        pass
+                    else:
+                        # Shift down by 1
+                        new_ins[k - 1] = v
                 
-                if ln + 1 in self.edits:
-                    del self.edits[ln + 1]
+                new_ed = {}
+                for k, v in self.edits.items():
+                    if k <= ln:
+                        new_ed[k] = v
+                    elif k == ln + 1:
+                        # Skip - this line is being deleted
+                        pass
+                    else:
+                        # Shift down by 1
+                        new_ed[k - 1] = v
+                
+                new_del = set()
+                for k in self.deleted_lines:
+                    if k <= ln:
+                        new_del.add(k)
+                    elif k == ln + 1:
+                        # Skip - already being deleted
+                        pass
+                    else:
+                        # Shift down by 1
+                        new_del.add(k - 1)
+                
+                self.inserted_lines = new_ins
+                self.edits = new_ed
+                self.deleted_lines = new_del
                 
                 # Track offset change (1 line deleted)
                 self._add_offset(ln + 2, -1)
         else:
+            # Normal delete within a line
             new_line = line[:col] + line[col+1:]
             
             if ln in self.inserted_lines:
