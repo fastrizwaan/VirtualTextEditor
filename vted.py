@@ -11,7 +11,8 @@ gi.require_version("Gdk", "4.0")
 from gi.repository import Gtk, Adw, Gdk, GObject, Pango, PangoCairo, GLib
 
 CSS_OVERLAY_SCROLLBAR = """
-.scrollbar-overlay {
+/* Vertical scrollbar */
+.vscrollbar-overlay {
     /* Default thickness when content scrolls */
     min-width: 2px;
     margin-right: 0px;
@@ -29,18 +30,53 @@ CSS_OVERLAY_SCROLLBAR = """
         border-radius 200ms ease;
 }
 
-/* Hover → wider */
-.scrollbar-overlay:hover {
+/* Vertical Hover → wider */
+.vscrollbar-overlay:hover {
     min-width: 8px;
     margin-right: 0px;
     background-color: rgba(255, 255, 255, 0.02);
     padding:5px;   
 }
 
-/* Dragging → fully expanded */
-.scrollbar-overlay.drag-active {
+/* Vertical Dragging → fully expanded */
+.vscrollbar-overlay.drag-active {
     min-width: 8px;
     margin-right: 0px;
+    background-color: rgba(255, 255, 255, 0.03);
+    padding:5px;
+}
+
+/* Horizontal scrollbar */
+.hscrollbar-overlay {
+    /* Default thickness when content scrolls */
+    min-height: 2px;
+    margin-bottom: 0px;
+    margin-right: 10px;
+    padding-left:4px;
+    padding-top:5px;
+    padding-bottom:5px;
+
+    background-color: rgba(255, 255, 255, 0.01);
+    border-radius: 12px;
+
+    transition:
+        min-height 200ms ease,
+        background-color 200ms ease,
+        border-radius 200ms ease;
+}
+
+/* Horizontal Hover → taller */
+.hscrollbar-overlay:hover {
+    min-height: 8px;
+    margin-bottom: 0px;
+    background-color: rgba(255, 255, 255, 0.02);
+    padding:5px;   
+}
+
+/* Horizontal Dragging → fully expanded */
+.hscrollbar-overlay.drag-active {
+    min-height: 8px;
+    margin-bottom: 0px;
     background-color: rgba(255, 255, 255, 0.03);
     padding:5px;
 }
@@ -946,6 +982,9 @@ class Renderer:
         self.text_h = logical_rect.height
         self.line_h = self.text_h
 
+        # Track maximum line width for horizontal scrollbar
+        self.max_line_width = 0
+        self.needs_full_width_scan = False  # Flag to scan all lines after file load</        
         # Colors
         self.editor_background_color = (0.10, 0.10, 0.10)
         self.text_foreground_color   = (0.90, 0.90, 0.90)
@@ -953,6 +992,33 @@ class Renderer:
         self.selection_background_color = (0.2, 0.4, 0.6)
         self.selection_foreground_color = (1.0, 1.0, 1.0)
 
+    def calculate_max_line_width(self, cr, buf):
+        """Calculate the maximum line width across all lines in the buffer"""
+        if not buf:
+            self.max_line_width = 0
+            return
+        
+        layout = PangoCairo.create_layout(cr)
+        layout.set_font_description(self.font)
+        layout.set_auto_dir(True)
+        
+        max_width = 0
+        total = buf.total()
+        ln_width = self.calculate_line_number_width(cr, total)
+        
+        # Check all lines
+        for ln in range(total):
+            text = buf.get_line(ln)
+            if text:
+                layout.set_text(text, -1)
+                ink, logical = layout.get_pixel_extents()
+                text_w = logical.width
+                line_total_width = ln_width + text_w
+                if line_total_width > max_width:
+                    max_width = line_total_width
+        
+        self.max_line_width = max_width
+    
     def get_text_width(self, cr, text):
         """Calculate actual pixel width of text using Pango"""
         if not text:
@@ -975,6 +1041,31 @@ class Renderer:
 
         import math
         import unicodedata
+        
+        # If we need a full width scan (e.g., after loading a file), do it first
+        if self.needs_full_width_scan and buf:
+            self.needs_full_width_scan = False
+            layout = PangoCairo.create_layout(cr)
+            layout.set_font_description(self.font)
+            layout.set_auto_dir(True)
+            
+            total = buf.total()
+            ln_width = self.calculate_line_number_width(cr, total)
+            max_width = 0
+            
+            # Scan first 1000 lines to get a quick estimate
+            scan_limit = min(1000, total)
+            for ln in range(scan_limit):
+                text = buf.get_line(ln)
+                if text:
+                    layout.set_text(text, -1)
+                    ink, logical = layout.get_pixel_extents()
+                    text_w = logical.width
+                    line_total_width = ln_width + text_w
+                    if line_total_width > max_width:
+                        max_width = line_total_width
+            
+            self.max_line_width = max_width
 
         # Base-direction detection
         def line_is_rtl(text):
@@ -1016,6 +1107,8 @@ class Renderer:
         # DRAW TEXT + LINE NUMBERS + SELECTION
         # ============================================================
         y = 0
+        max_width_seen = self.max_line_width  # Start with existing max, don't reset
+        
         for ln in range(scroll_line, min(scroll_line + max_vis, total)):
             text = buf.get_line(ln)
 
@@ -1033,6 +1126,11 @@ class Renderer:
 
             ink, logical = layout.get_pixel_extents()
             text_w = logical.width
+            
+            # Track maximum width for horizontal scrollbar
+            line_total_width = ln_width + text_w
+            if line_total_width > max_width_seen:
+                max_width_seen = line_total_width
 
             # Calculate base position
             if is_rtl:
@@ -1101,6 +1199,9 @@ class Renderer:
 
             y += self.line_h
 
+        # Update tracked maximum line width for horizontal scrollbar
+        self.max_line_width = max_width_seen
+        
         # ============================================================
         # PREEDIT (IME)
         # ============================================================
@@ -1243,7 +1344,8 @@ class VirtualTextView(Gtk.DrawingArea):
         self.im.connect("preedit-changed", self.on_preedit_changed)
         self.im.connect("preedit-start", self.on_preedit_start)
         self.im.connect("preedit-end", self.on_preedit_end)
-        
+        self.connect("resize", self.on_resize)
+
         # Preedit state
         self.preedit_string = ""
         self.preedit_cursor = 0
@@ -1263,12 +1365,30 @@ class VirtualTextView(Gtk.DrawingArea):
         self.cursor_fade_speed = 0.03     # 0.02 ~ 50fps smooth fade
 
         self.start_cursor_blink()
+        
+        # Connect to size changes to update scrollbars
+        self.connect('resize', self.on_resize)
+    
+    def on_resize(self, widget, width, height):
+        """Handle window resize to update scrollbar visibility"""
+        self.update_scrollbar()
+        return False
 
+    def file_loaded(self):
+        """Called after a new file is loaded to trigger width calculation"""
+        self.renderer.needs_full_width_scan = True
+        self.queue_draw()
+        self.update_scrollbar()
+    
     def update_scrollbar(self):
-        sb = getattr(self, "scrollbar", None)
-        if sb is not None:
-            sb.update_visibility()
-            sb.queue_draw()
+        vsb = getattr(self, "vscroll", None)
+        if vsb is not None:
+            vsb.update_visibility()
+            vsb.queue_draw()
+        hsb = getattr(self, "hscroll", None)
+        if hsb is not None:
+            hsb.update_visibility()
+            hsb.queue_draw()
 
     # Correct UTF-8 byte-index for logical col → Pango visual mapping
     def visual_byte_index(self, text, col):
@@ -1980,6 +2100,10 @@ class VirtualTextView(Gtk.DrawingArea):
             self.cursor_visible,
             self.cursor_phase   # NEW
         )
+        # Update scrollbars after drawing (this updates visibility based on content)
+        GLib.idle_add(lambda: (self.update_scrollbar(), False))
+
+
 
 
 
@@ -1987,7 +2111,7 @@ class VirtualTextView(Gtk.DrawingArea):
 #   SCROLLBAR (simple)
 # ============================================================
 
-class VirtualScrollbar(Gtk.DrawingArea):
+class VirtualVScrollbar(Gtk.DrawingArea):
 
     def __init__(self, view):
         super().__init__()
@@ -1996,9 +2120,9 @@ class VirtualScrollbar(Gtk.DrawingArea):
         self.set_halign(Gtk.Align.END)
         self.set_valign(Gtk.Align.FILL)
         self.set_size_request(2, -1)
-        self.add_css_class("scrollbar-overlay")
+        self.add_css_class("vscrollbar-overlay")
 
-        self.set_draw_func(self.draw_scrollbar)
+        self.set_draw_func(self.draw)
 
         click = Gtk.GestureClick()
         click.connect("pressed", self.on_click)
@@ -2047,7 +2171,9 @@ class VirtualScrollbar(Gtk.DrawingArea):
         self.hovering = False
         self.queue_draw()
 
-    def draw_scrollbar(self, area, cr, w, h):
+    def draw(self, area, cr, w, h):
+        if w <= 0 or h <= 0:
+            return
         self.update_visibility()
         if not self.get_visible():
             return
@@ -2149,6 +2275,207 @@ class VirtualScrollbar(Gtk.DrawingArea):
         self.queue_draw()
 
 
+# ============================================================
+#   HORIZONTAL SCROLLBAR (OVERLAY)
+# ============================================================
+
+class VirtualHScrollbar(Gtk.DrawingArea):
+    """
+    Horizontal scrollbar overlay for VirtualTextView
+    """
+
+    def __init__(self, view):
+        super().__init__()
+        self.view = view
+        self.set_size_request(-1, 14)
+        self.add_css_class("hscrollbar-overlay")
+
+        self.dragging = False
+        self.drag_offset = 0      # <-- NEW: offset inside thumb
+        self.hovering = False
+
+        self.set_draw_func(self.draw)
+
+        click = Gtk.GestureClick.new()
+        click.connect("pressed", self.on_click)
+        click.connect("released", self.on_release)
+        self.add_controller(click)
+
+        drag = Gtk.GestureDrag.new()
+        drag.connect("drag-begin", self.on_drag_begin)
+        drag.connect("drag-end", self.on_drag_end)
+        drag.connect("drag-update", self.on_drag_update)
+        self.add_controller(drag)
+
+        hover = Gtk.EventControllerMotion.new()
+        hover.connect("enter", lambda *_: setattr(self, 'hovering', True) or self.queue_draw())
+        hover.connect("leave", lambda *_: setattr(self, 'hovering', False) or self.queue_draw())
+        self.add_controller(hover)
+
+        # Initialize as visible
+        self.set_visible(True)
+
+    # ---------------------------------------------------------
+    # Helpers needed during drag
+    # ---------------------------------------------------------
+
+    def compute_thumb_geometry(self):
+        """Return (thumb_x, thumb_w, max_scroll) based on current view."""
+        view = self.view
+        w = self.get_width()
+        view_width = view.get_width()
+        max_width = view.renderer.max_line_width + 100
+
+        max_scroll = max(0, max_width - view_width)
+
+        if max_width <= view_width:
+            thumb_w = w
+        else:
+            thumb_w = w * (view_width / max_width)
+            thumb_w = max(30, min(w, thumb_w))
+
+        if max_scroll == 0:
+            pos = 0.0
+        else:
+            pos = view.scroll_x / max_scroll
+
+        x = pos * (w - thumb_w)
+        return x, thumb_w, max_scroll
+
+
+    def update_visibility(self):
+        """Update scrollbar visibility based on content"""
+        if not self.view.buf or not hasattr(self.view.renderer, 'max_line_width'):
+            self.set_visible(False)
+            return
+        
+        view_width = self.view.get_width()
+        max_width = self.view.renderer.max_line_width + 100  # Add some padding
+        
+        # Show scrollbar if content is wider than view
+        needs_scroll = max_width > view_width
+        self.set_visible(needs_scroll)
+
+    # ---------------------------------------------------------
+    # Drawing
+    # ---------------------------------------------------------
+
+    def draw(self, area, cr, w, h):
+        if w <= 0 or h <= 0:
+            return
+        if not self.view.buf:
+            return
+
+        # Calculate thumb dimensions
+        view = self.view
+        view_width = view.get_width()
+        max_width = view.renderer.max_line_width + 100
+        
+        if max_width <= view_width:
+            thumb_w = w
+        else:
+            thumb_w = w * (view_width / max_width)
+            thumb_w = max(30, min(w, thumb_w))
+
+        # Calculate thumb position
+        max_scroll = max(0, max_width - view_width)
+        if max_scroll == 0:
+            pos = 0.0
+        else:
+            pos = view.scroll_x / max_scroll
+
+        pos = max(0, min(1, pos))
+        x = pos * (w - thumb_w)
+
+        # Brightness logic using hover + drag flags
+        if self.dragging:
+            alpha = 0.90
+        elif self.hovering:
+            alpha = 0.60
+        else:
+            alpha = 0.50
+
+        cr.set_source_rgba(1, 1, 1, alpha)
+
+        # Draw rounded rectangle for horizontal scrollbar
+        r = min(h, thumb_w) / 2.0
+        cr.new_path()
+        cr.arc(x + r,             h - r, r, 180 * math.pi/180, 270*math.pi/180)
+        cr.arc(x + thumb_w - r,   h - r, r, 270*math.pi/180, 0)
+        cr.arc(x + thumb_w - r,   r,     r, 0, 90 * math.pi/180)
+        cr.arc(x + r,             r,     r, 90 * math.pi/180, 180*math.pi/180)
+        cr.close_path()
+        cr.fill()
+
+    # ---------------------------------------------------------
+    # Interaction
+    # ---------------------------------------------------------
+
+    def on_click(self, g, n_press, x, y):
+        if not self.get_visible():
+            return
+
+        thumb_x, thumb_w, _ = self.compute_thumb_geometry()
+
+        self.dragging = True
+        # Offset pointer inside thumb (fixes jumping)
+        self.drag_offset = x - thumb_x
+        self.add_css_class("drag-active")
+
+    def on_drag_begin(self, g, x, y):
+        if not self.get_visible():
+            return
+
+        thumb_x, thumb_w, _ = self.compute_thumb_geometry()
+
+        self.dragging = True
+        # Offset pointer inside thumb (fixes jumping)
+        self.drag_offset = x - thumb_x
+        self.add_css_class("drag-active")
+
+    def on_drag_update(self, g, dx, dy):
+        if not self.dragging or not self.get_visible():
+            return
+
+        view = self.view
+        w = self.get_width()
+
+        thumb_x, thumb_w, max_scroll = self.compute_thumb_geometry()
+
+        if max_scroll <= 0:
+            return
+
+        # Track width
+        track = max(1, w - thumb_w)
+
+        # Pointer position minus offset inside thumb
+        ok, start_x, start_y = g.get_start_point()
+        current_x = start_x + dx
+
+        # New thumb-left
+        new_thumb_x = current_x - self.drag_offset
+        new_thumb_x = max(0.0, min(track, new_thumb_x))
+
+        # Convert thumb position → scroll_x
+        frac = new_thumb_x / track
+        view.scroll_x = int(frac * max_scroll)
+
+        view.queue_draw()
+        self.queue_draw()
+
+    def on_release(self, g, n_press, x, y):
+        if not self.get_visible():
+            return
+        self.dragging = False
+        self.remove_css_class("drag-active")
+
+    def on_drag_end(self, g, dx, dy):
+        if not self.get_visible():
+            return
+        self.dragging = False
+        self.remove_css_class("drag-active")
+
+
 
 
 # ============================================================
@@ -2200,10 +2527,12 @@ class EditorWindow(Adw.ApplicationWindow):
 
         self.buf = VirtualBuffer()
         self.view = VirtualTextView(self.buf)
-        self.scrollbar = VirtualScrollbar(self.view)
+        self.vscroll = VirtualVScrollbar(self.view)
+        self.hscroll = VirtualHScrollbar(self.view)
 
-        # IMPORTANT: give the view a reference to the overlay scrollbar
-        self.view.scrollbar = self.scrollbar
+        # IMPORTANT: give the view references to both scrollbars
+        self.view.vscroll = self.vscroll
+        self.view.hscroll = self.hscroll
 
         self.buf.connect("changed", self.on_buffer_changed)
 
@@ -2222,20 +2551,29 @@ class EditorWindow(Adw.ApplicationWindow):
         # main content
         overlay.set_child(self.view)
 
-        # overlay scrollbar
-        overlay.add_overlay(self.scrollbar)
+        # overlay vertical scrollbar
+        overlay.add_overlay(self.vscroll)
 
-        # let it float on top right
-        self.scrollbar.set_halign(Gtk.Align.END)
-        self.scrollbar.set_valign(Gtk.Align.FILL)
+        # overlay horizontal scrollbar
+        overlay.add_overlay(self.hscroll)
+
+        # let vertical scrollbar float on top right
+        self.vscroll.set_halign(Gtk.Align.END)
+        self.vscroll.set_valign(Gtk.Align.FILL)
+
+        # let horizontal scrollbar float on bottom
+        self.hscroll.set_halign(Gtk.Align.FILL)
+        self.hscroll.set_valign(Gtk.Align.END)
 
         layout.set_content(overlay)
 
 
     def on_buffer_changed(self, *_):
         self.view.queue_draw()
-        self.scrollbar.update_visibility()   # NEW: auto-hide when content fits
-        self.scrollbar.queue_draw()
+        self.vscroll.update_visibility()   # auto-hide vertical when content fits
+        self.hscroll.update_visibility()   # auto-hide horizontal when content fits
+        self.vscroll.queue_draw()
+        self.hscroll.queue_draw()
 
 
     def open_file(self, *_):
@@ -2262,12 +2600,19 @@ class EditorWindow(Adw.ApplicationWindow):
 
                 self.view.scroll_line = 0
                 self.view.scroll_x = 0
+                
+                # Trigger width scan for the new file
+                self.view.file_loaded()
 
-                # update scrollbar after loading new file
-                self.scrollbar.update_visibility()
+                # update scrollbars after loading new file
+                GLib.idle_add(lambda: (self.hscroll.update_visibility(),
+                       self.vscroll.update_visibility(),
+                       False))
+
 
                 self.view.queue_draw()
-                self.scrollbar.queue_draw()
+                self.vscroll.queue_draw()
+                self.hscroll.queue_draw()
 
                 self.set_title(os.path.basename(path))
                 loading_dialog.close()
