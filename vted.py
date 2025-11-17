@@ -450,10 +450,13 @@ class VirtualBuffer(GObject.Object):
         col = max(0, min(col, len(line)))
         
         if extend_selection:
+            # Start selection if not already active
             if not self.selection.active:
                 self.selection.set_start(self.cursor_line, self.cursor_col)
+            # Update end point
             self.selection.set_end(ln, col)
         else:
+            # Clear selection if not extending
             if not self.selection.selecting_with_keyboard:
                 self.selection.clear()
         
@@ -1021,8 +1024,10 @@ class InputController:
             start_ln, start_col, _, _ = b.selection.get_bounds()
             b.set_cursor(start_ln, start_col, extend_selection)
         elif col > 0:
+            # Move left within line
             b.set_cursor(ln, col - 1, extend_selection)
         elif ln > 0:
+            # At start of line - move to end of previous line (selecting the newline)
             prev = b.get_line(ln - 1)
             b.set_cursor(ln - 1, len(prev), extend_selection)
 
@@ -1036,26 +1041,79 @@ class InputController:
             _, _, end_ln, end_col = b.selection.get_bounds()
             b.set_cursor(end_ln, end_col, extend_selection)
         elif col < len(line):
+            # Move right within line
             b.set_cursor(ln, col + 1, extend_selection)
         elif ln + 1 < b.total():
+            # At end of line - move to start of next line (selecting the newline)
             b.set_cursor(ln + 1, 0, extend_selection)
 
     def move_up(self, extend_selection=False):
         b = self.buf
         ln = b.cursor_line
+        
         if ln > 0:
+            # Can move up to previous line
             target = ln - 1
-            line = b.get_line(target)
-            b.set_cursor(target, min(b.cursor_col, len(line)), extend_selection)
+            target_line = b.get_line(target)
+            
+            if extend_selection:
+                # When extending selection upward
+                # Check if target is an empty line
+                if len(target_line) == 0:
+                    # Moving up to an empty line - go to position 0
+                    b.set_cursor(target, 0, extend_selection)
+                else:
+                    # Normal selection - maintain column position if possible
+                    new_col = min(b.cursor_col, len(target_line))
+                    b.set_cursor(target, new_col, extend_selection)
+            else:
+                # Not extending selection - normal movement
+                new_col = min(b.cursor_col, len(target_line))
+                b.set_cursor(target, new_col, extend_selection)
+        else:
+            # Already on first line (line 0), can't move up
+            # If extending selection, select to beginning of current line (like shift+home)
+            if extend_selection:
+                b.set_cursor(0, 0, extend_selection)
 
     def move_down(self, extend_selection=False):
         b = self.buf
         ln = b.cursor_line
+        
         if ln + 1 < b.total():
+            # Can move down to next line
             target = ln + 1
-            line = b.get_line(target)
-            b.set_cursor(target, min(b.cursor_col, len(line)), extend_selection)
-
+            target_line = b.get_line(target)
+            
+            if extend_selection:
+                # When extending selection downward
+                current_line = b.get_line(ln)
+                
+                # Check if target is the last line (no newline after it)
+                is_last_line = (target == b.total() - 1)
+                
+                # Special case: at column 0 of empty line
+                if len(current_line) == 0 and b.cursor_col == 0:
+                    if is_last_line:
+                        # Empty line followed by last line - select to end of last line
+                        b.set_cursor(target, len(target_line), extend_selection)
+                    else:
+                        # Empty line with more lines after - select just the newline
+                        b.set_cursor(target, 0, extend_selection)
+                else:
+                    # Normal selection - maintain column position
+                    new_col = min(b.cursor_col, len(target_line))
+                    b.set_cursor(target, new_col, extend_selection)
+            else:
+                # Not extending selection - normal movement
+                new_col = min(b.cursor_col, len(target_line))
+                b.set_cursor(target, new_col, extend_selection)
+        else:
+            # Already on last line, can't move down
+            # If extending selection, select to end of current line (like shift+end)
+            if extend_selection:
+                current_line = b.get_line(ln)
+                b.set_cursor(ln, len(current_line), extend_selection)
     def move_home(self, extend_selection=False):
         """Move to beginning of line"""
         b = self.buf
@@ -1277,6 +1335,8 @@ class Renderer:
             cr.clip()
 
             # Draw selection background for this line if needed
+            # Draw selection background for this line if needed
+            # Draw selection background for this line if needed
             if has_selection and sel_start_line <= ln <= sel_end_line:
                 # Calculate selection range for this line
                 if ln == sel_start_line and ln == sel_end_line:
@@ -1284,45 +1344,92 @@ class Renderer:
                     start_col = sel_start_col
                     end_col = sel_end_col
                 elif ln == sel_start_line:
-                    # First line of multi-line selection
+                    # First line of multi-line selection - select to end + newline indicator
                     start_col = sel_start_col
-                    end_col = len(text)
+                    end_col = len(text) + 1  # +1 to include newline visual
                 elif ln == sel_end_line:
-                    # Last line of multi-line selection
+                    # Last line of multi-line selection - select from start to end_col
                     start_col = 0
                     end_col = sel_end_col
                 else:
-                    # Middle line - select entire line
+                    # Middle line - select entire line + newline indicator
                     start_col = 0
-                    end_col = len(text)
+                    end_col = len(text) + 1  # +1 to include newline visual
                 
                 # Calculate pixel positions for selection
-                if text:
+                if text or start_col == 0:
                     # Get start position
-                    start_byte = visual_byte_index(text, start_col)
-                    strong_pos, _ = layout.get_cursor_pos(start_byte)
-                    sel_start_x = base_x + (strong_pos.x // Pango.SCALE)
+                    if start_col <= len(text):
+                        start_byte = visual_byte_index(text, min(start_col, len(text)))
+                        strong_pos, _ = layout.get_cursor_pos(start_byte)
+                        sel_start_x = base_x + (strong_pos.x // Pango.SCALE)
+                    else:
+                        sel_start_x = base_x
                     
                     # Get end position
-                    end_byte = visual_byte_index(text, end_col)
-                    strong_pos, _ = layout.get_cursor_pos(end_byte)
-                    sel_end_x = base_x + (strong_pos.x // Pango.SCALE)
+                    if end_col <= len(text):
+                        end_byte = visual_byte_index(text, end_col)
+                        strong_pos, _ = layout.get_cursor_pos(end_byte)
+                        sel_end_x = base_x + (strong_pos.x // Pango.SCALE)
+                    else:
+                        # Include newline indicator - extend to viewport end
+                        if text:
+                            end_byte = visual_byte_index(text, len(text))
+                            strong_pos, _ = layout.get_cursor_pos(end_byte)
+                            sel_end_x = base_x + (strong_pos.x // Pango.SCALE)
+                        else:
+                            sel_end_x = base_x
+                        
+                        # For lines with newline selected, we'll extend to viewport later
+                        text_end_x = sel_end_x
                 else:
-                    # Empty line - draw selection from line start
+                    # Empty line with selection
                     sel_start_x = base_x
-                    sel_end_x = base_x + self.get_text_width(cr, " ")
+                    text_end_x = base_x
+                    sel_end_x = base_x
                 
-                # Draw selection rectangle
-                cr.set_source_rgba(*self.selection_background_color, 0.7)
-                
-                if is_rtl:
-                    # RTL selection might need to be reversed
-                    cr.rectangle(min(sel_start_x, sel_end_x), y, 
-                            abs(sel_end_x - sel_start_x), self.line_h)
+                # Draw main text selection rectangle
+                if end_col <= len(text):
+                    # Normal selection within text
+                    cr.set_source_rgba(*self.selection_background_color, 0.7)
+                    if is_rtl:
+                        cr.rectangle(min(sel_start_x, sel_end_x), y, 
+                                abs(sel_end_x - sel_start_x), self.line_h)
+                    else:
+                        cr.rectangle(sel_start_x, y, 
+                                sel_end_x - sel_start_x, self.line_h)
+                    cr.fill()
                 else:
-                    cr.rectangle(sel_start_x, y, 
-                            sel_end_x - sel_start_x, self.line_h)
-                cr.fill()
+                    # Selection includes newline - draw text selection + newline indicator
+                    # Draw text selection part
+                    if text:
+                        cr.set_source_rgba(*self.selection_background_color, 0.7)
+                        if is_rtl:
+                            cr.rectangle(min(sel_start_x, text_end_x), y, 
+                                    abs(text_end_x - sel_start_x), self.line_h)
+                        else:
+                            cr.rectangle(sel_start_x, y, 
+                                    text_end_x - sel_start_x, self.line_h)
+                        cr.fill()
+                    
+                    # Draw newline indicator extending to viewport edge
+                    newline_start_x = text_end_x if text else ln_width
+                    newline_end_x = alloc.width  # Extend to viewport edge
+                    
+                    # Use slightly darker/different shade for newline area
+                    cr.set_source_rgba(*self.selection_background_color, 0.7)
+                    cr.rectangle(newline_start_x, y, 
+                            newline_end_x - newline_start_x, self.line_h)
+                    cr.fill()
+                    
+                    # Draw a subtle vertical line at the end of actual text to mark the newline position
+                    # Don't really need it disabled it with 0.0
+                    if text:
+                        cr.set_source_rgba(*self.selection_foreground_color, 0.0)
+                        cr.set_line_width(1)
+                        cr.move_to(text_end_x, y)
+                        cr.line_to(text_end_x, y + self.line_h)
+                        cr.stroke()
 
             # Draw line text
             if text:  # Only draw if there's actual text
@@ -2227,13 +2334,16 @@ class VirtualTextView(Gtk.DrawingArea):
 
         alloc = type("Alloc", (), {"width": w, "height": h})
 
+        # Hide cursor if there's an active selection
+        show_cursor = self.cursor_visible and not self.buf.selection.has_selection()
+
         self.renderer.draw(
             cr,
             alloc,
             self.buf,
             self.scroll_line,
             self.scroll_x,
-            self.cursor_visible,
+            show_cursor,
             self.cursor_phase   # NEW
         )
         # Update scrollbars after drawing (this updates visibility based on content)
