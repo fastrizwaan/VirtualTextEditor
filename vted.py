@@ -3,8 +3,10 @@ import sys, os, mmap, gi, cairo, time
 from threading import Thread
 from array import array
 import math
+import bisect
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
+gi.require_version("Gdk", "4.0")
 
 from gi.repository import Gtk, Adw, Gdk, GObject, Pango, PangoCairo, GLib
 
@@ -167,6 +169,88 @@ class IndexedFile:
 
 
 # ============================================================
+#   SELECTION
+# ============================================================
+
+class Selection:
+    """Manages text selection state"""
+    
+    def __init__(self):
+        self.start_line = -1
+        self.start_col = -1
+        self.end_line = -1
+        self.end_col = -1
+        self.active = False
+        self.selecting_with_keyboard = False
+    
+    def clear(self):
+        """Clear the selection"""
+        self.start_line = -1
+        self.start_col = -1
+        self.end_line = -1
+        self.end_col = -1
+        self.active = False
+        self.selecting_with_keyboard = False
+    
+    def set_start(self, line, col):
+        """Set selection start point"""
+        self.start_line = line
+        self.start_col = col
+        self.end_line = line
+        self.end_col = col
+        self.active = True
+    
+    def set_end(self, line, col):
+        """Set selection end point"""
+        self.end_line = line
+        self.end_col = col
+        self.active = (self.start_line != self.end_line or self.start_col != self.end_col)
+    
+    def has_selection(self):
+        """Check if there's an active selection"""
+        return self.active and (
+            self.start_line != self.end_line or 
+            self.start_col != self.end_col
+        )
+    
+    def get_bounds(self):
+        """Get normalized selection bounds (start always before end)"""
+        if not self.has_selection():
+            return None, None, None, None
+            
+        # Normalize so start is always before end
+        if self.start_line < self.end_line:
+            return self.start_line, self.start_col, self.end_line, self.end_col
+        elif self.start_line > self.end_line:
+            return self.end_line, self.end_col, self.start_line, self.start_col
+        else:
+            # Same line
+            if self.start_col <= self.end_col:
+                return self.start_line, self.start_col, self.end_line, self.end_col
+            else:
+                return self.end_line, self.end_col, self.start_line, self.start_col
+    
+    def contains_position(self, line, col):
+        """Check if a position is within the selection"""
+        if not self.has_selection():
+            return False
+            
+        start_line, start_col, end_line, end_col = self.get_bounds()
+        
+        if line < start_line or line > end_line:
+            return False
+        
+        if line == start_line and line == end_line:
+            return start_col <= col <= end_col
+        elif line == start_line:
+            return col >= start_col
+        elif line == end_line:
+            return col <= end_col
+        else:
+            return True
+
+
+# ============================================================
 #   BUFFER
 # ============================================================
 
@@ -178,81 +262,380 @@ class VirtualBuffer(GObject.Object):
     def __init__(self):
         super().__init__()
         self.file = None            # IndexedFile
-        self.edits = {}             # sparse: line_number → modified string
+        self.edits = {}             # sparse: logical_line → modified string
+        self.deleted_lines = set()  # Track deleted logical lines
+        self.inserted_lines = {}    # Track inserted lines: logical_line → content
+        self.line_offsets = []      # List of (logical_line, offset) tuples - sorted by logical_line
         self.cursor_line = 0
         self.cursor_col = 0
+        self.selection = Selection()
 
     def load(self, indexed_file):
         self.file = indexed_file
         self.edits.clear()
+        self.deleted_lines.clear()
+        self.inserted_lines.clear()
+        self.line_offsets = []
         self.cursor_line = 0
         self.cursor_col = 0
+        self.selection.clear()
         self.emit("changed")
 
-    def total(self):
-        """Return total number of logical lines in the buffer.
-
-        If a file is loaded, base it on file length and any edited lines.
-        If no file is loaded, base it on edited lines (or at least 1).
-        """
+    def _logical_to_physical(self, logical_line):
+        """Convert logical line number to physical file line number"""
         if not self.file:
-            # When editing an empty/new buffer, consider edits so added
-            if not self.edits:
+            return logical_line
+        
+        # Calculate cumulative offset at this logical line
+        offset = 0
+        for log_line, off in self.line_offsets:
+            if log_line <= logical_line:
+                offset = off
+            else:
+                break
+        
+        return logical_line - offset
+
+    def total(self):
+        """Return total number of logical lines in the buffer."""
+        if not self.file:
+            if not self.edits and not self.inserted_lines:
                 return 1
-            return max(1, max(self.edits.keys()) + 1)
+            all_lines = set(self.edits.keys()) | set(self.inserted_lines.keys())
+            return max(1, max(all_lines) + 1) if all_lines else 1
 
-        # File is present
-        if not self.edits:
-            return self.file.total_lines()
-
-        max_edited = max(self.edits.keys())
-        return max(self.file.total_lines(), max_edited + 1)
-
+        # File is present - file lines plus net insertions
+        base = self.file.total_lines()
+        
+        # Calculate net change from offsets
+        if self.line_offsets:
+            # The last offset tells us the total shift
+            net_insertions = self.line_offsets[-1][1]
+            return base + net_insertions
+        
+        return base
 
     def get_line(self, ln):
+        # Check if it's an inserted line first
+        if ln in self.inserted_lines:
+            return self.inserted_lines[ln]
+        
+        # Check if it's an edited line
         if ln in self.edits:
             return self.edits[ln]
+        
+        # Check if deleted
+        if ln in self.deleted_lines:
+            return ""
+        
+        # Convert to physical line and return from file
         if self.file:
-            return self.file[ln] if 0 <= ln < self.file.total_lines() else ""
+            physical = self._logical_to_physical(ln)
+            return self.file[physical] if 0 <= physical < self.file.total_lines() else ""
         return ""
 
+    def _add_offset(self, at_line, delta):
+        """Add an offset delta starting at logical line at_line"""
+        # Find if there's already an offset entry at this line
+        found_idx = -1
+        for idx, (log_line, offset) in enumerate(self.line_offsets):
+            if log_line == at_line:
+                found_idx = idx
+                break
+        
+        if found_idx >= 0:
+            # Update existing offset
+            old_offset = self.line_offsets[found_idx][1]
+            self.line_offsets[found_idx] = (at_line, old_offset + delta)
+        else:
+            # Add new offset entry
+            # First, find what the offset was just before this line
+            prev_offset = 0
+            insert_idx = 0
+            for idx, (log_line, offset) in enumerate(self.line_offsets):
+                if log_line < at_line:
+                    prev_offset = offset
+                    insert_idx = idx + 1
+                else:
+                    break
+            
+            # Insert new offset entry
+            self.line_offsets.insert(insert_idx, (at_line, prev_offset + delta))
+        
+        # Update all subsequent offset entries
+        for idx in range(found_idx + 1 if found_idx >= 0 else insert_idx + 1, len(self.line_offsets)):
+            log_line, offset = self.line_offsets[idx]
+            self.line_offsets[idx] = (log_line, offset + delta)
 
-
-    def set_cursor(self, ln, col):
+    def set_cursor(self, ln, col, extend_selection=False):
         total = self.total()
         ln = max(0, min(ln, total - 1))
         line = self.get_line(ln)
         col = max(0, min(col, len(line)))
+        
+        if extend_selection:
+            if not self.selection.active:
+                self.selection.set_start(self.cursor_line, self.cursor_col)
+            self.selection.set_end(ln, col)
+        else:
+            if not self.selection.selecting_with_keyboard:
+                self.selection.clear()
+        
         self.cursor_line = ln
         self.cursor_col = col
 
-    # ------- Editing ----------
+    def select_all(self):
+        """Select all text in the buffer"""
+        self.selection.set_start(0, 0)
+        total = self.total()
+        last_line = total - 1
+        last_line_text = self.get_line(last_line)
+        self.selection.set_end(last_line, len(last_line_text))
+        self.cursor_line = last_line
+        self.cursor_col = len(last_line_text)
+        self.emit("changed")
+    
+    def get_selected_text(self):
+        """Get the currently selected text"""
+        if not self.selection.has_selection():
+            return ""
+        
+        start_line, start_col, end_line, end_col = self.selection.get_bounds()
+        
+        if start_line == end_line:
+            line = self.get_line(start_line)
+            return line[start_col:end_col]
+        else:
+            lines = []
+            first_line = self.get_line(start_line)
+            lines.append(first_line[start_col:])
+            
+            for ln in range(start_line + 1, end_line):
+                lines.append(self.get_line(ln))
+            
+            last_line = self.get_line(end_line)
+            lines.append(last_line[:end_col])
+            
+            return '\n'.join(lines)
+    
+    def delete_selection(self):
+        """Delete the selected text"""
+        if not self.selection.has_selection():
+            return False
+        
+        start_line, start_col, end_line, end_col = self.selection.get_bounds()
+        
+        if start_line == end_line:
+            line = self.get_line(start_line)
+            new_line = line[:start_col] + line[end_col:]
+            
+            if start_line in self.inserted_lines:
+                self.inserted_lines[start_line] = new_line
+            else:
+                self.edits[start_line] = new_line
+        else:
+            first_line = self.get_line(start_line)
+            last_line = self.get_line(end_line)
+            new_line = first_line[:start_col] + last_line[end_col:]
+            
+            # Mark middle lines as deleted
+            for ln in range(start_line + 1, end_line + 1):
+                if ln in self.inserted_lines:
+                    del self.inserted_lines[ln]
+                else:
+                    self.deleted_lines.add(ln)
+                
+                if ln in self.edits:
+                    del self.edits[ln]
+            
+            # Set the merged line
+            if start_line in self.inserted_lines:
+                self.inserted_lines[start_line] = new_line
+            else:
+                self.edits[start_line] = new_line
+            
+            # Track offset change (deleted lines)
+            lines_deleted = end_line - start_line
+            self._add_offset(end_line + 1, -lines_deleted)
+        
+        self.cursor_line = start_line
+        self.cursor_col = start_col
+        self.selection.clear()
+        self.emit("changed")
+        return True
+
     def insert_text(self, text):
-        ln = self.cursor_line
-        line = self.get_line(ln)
+        # If there's a selection, delete it first
+        if self.selection.has_selection():
+            self.delete_selection()
+
+        ln  = self.cursor_line
         col = self.cursor_col
+        old = self.get_line(ln)
 
-        new_line = line[:col] + text + line[col:]
-        self.edits[ln] = new_line
+        # Split insert by newline
+        parts = text.split("\n")
 
-        self.cursor_col = col + len(text)
+        if len(parts) == 1:
+            # ---------------------------
+            # Simple one-line insert
+            # ---------------------------
+            new_line = old[:col] + text + old[col:]
+
+            if ln in self.inserted_lines:
+                self.inserted_lines[ln] = new_line
+            else:
+                self.edits[ln] = new_line
+
+            self.cursor_col += len(text)
+            self.emit("changed")
+            return
+
+        # ------------------------------------------------------------
+        # Multi-line insert
+        # ------------------------------------------------------------
+        first = parts[0]
+        last  = parts[-1]
+        middle = parts[1:-1]   # may be empty
+
+        # Left + first-line fragment
+        left_part  = old[:col] + first
+        right_part = last + old[col:]
+
+        # Update current line with left_part
+        if ln in self.inserted_lines:
+            self.inserted_lines[ln] = left_part
+        else:
+            self.edits[ln] = left_part
+
+        # Shift only virtual lines (inserted/edited/deleted)
+        new_ins = {}
+        for k, v in self.inserted_lines.items():
+            new_ins[k if k <= ln else k+len(parts)-1] = v
+
+        new_ed = {}
+        for k, v in self.edits.items():
+            new_ed[k if k <= ln else k+len(parts)-1] = v
+
+        new_del = set()
+        for k in self.deleted_lines:
+            new_del.add(k if k <= ln else k+len(parts)-1)
+
+        # Insert the middle lines
+        cur = ln
+        for m in middle:
+            cur += 1
+            new_ins[cur] = m
+
+        # Insert last line (right fragment)
+        new_ins[ln + len(parts) - 1] = right_part
+
+        # Apply dicts
+        self.inserted_lines = new_ins
+        self.edits = new_ed
+        self.deleted_lines = new_del
+
+        # Offset update (insert count = len(parts)-1)
+        self._add_offset(ln + 1, len(parts) - 1)
+
+        # Final cursor
+        self.cursor_line = ln + len(parts) - 1
+        self.cursor_col  = len(last)
+
+        self.selection.clear()
         self.emit("changed")
 
+
     def backspace(self):
+        if self.selection.has_selection():
+            self.delete_selection()
+            return
+        
         ln = self.cursor_line
         line = self.get_line(ln)
         col = self.cursor_col
 
         if col == 0:
+            if ln > 0:
+                prev_line = self.get_line(ln - 1)
+                new_line = prev_line + line
+                
+                if ln - 1 in self.inserted_lines:
+                    self.inserted_lines[ln - 1] = new_line
+                else:
+                    self.edits[ln - 1] = new_line
+                
+                if ln in self.inserted_lines:
+                    del self.inserted_lines[ln]
+                else:
+                    self.deleted_lines.add(ln)
+                
+                if ln in self.edits:
+                    del self.edits[ln]
+                
+                # Track offset change (1 line deleted)
+                self._add_offset(ln + 1, -1)
+                
+                self.cursor_line = ln - 1
+                self.cursor_col = len(prev_line)
+        else:
+            new_line = line[:col-1] + line[col:]
+            
+            if ln in self.inserted_lines:
+                self.inserted_lines[ln] = new_line
+            else:
+                self.edits[ln] = new_line
+            
+            self.cursor_col = col - 1
+
+        self.selection.clear()
+        self.emit("changed")
+
+    def delete_key(self):
+        """Handle Delete key press"""
+        if self.selection.has_selection():
+            self.delete_selection()
             return
-
-        new_line = line[:col-1] + line[col:]
-        self.edits[ln] = new_line
-
-        self.cursor_col = col - 1
+        
+        ln = self.cursor_line
+        line = self.get_line(ln)
+        col = self.cursor_col
+        
+        if col >= len(line):
+            if ln < self.total() - 1:
+                next_line = self.get_line(ln + 1)
+                new_line = line + next_line
+                
+                if ln in self.inserted_lines:
+                    self.inserted_lines[ln] = new_line
+                else:
+                    self.edits[ln] = new_line
+                
+                if ln + 1 in self.inserted_lines:
+                    del self.inserted_lines[ln + 1]
+                else:
+                    self.deleted_lines.add(ln + 1)
+                
+                if ln + 1 in self.edits:
+                    del self.edits[ln + 1]
+                
+                # Track offset change (1 line deleted)
+                self._add_offset(ln + 2, -1)
+        else:
+            new_line = line[:col] + line[col+1:]
+            
+            if ln in self.inserted_lines:
+                self.inserted_lines[ln] = new_line
+            else:
+                self.edits[ln] = new_line
+        
+        self.selection.clear()
         self.emit("changed")
 
     def insert_newline(self):
+        if self.selection.has_selection():
+            self.delete_selection()
+        
         ln = self.cursor_line
         col = self.cursor_col
 
@@ -260,28 +643,125 @@ class VirtualBuffer(GObject.Object):
         left = old_line[:col]
         right = old_line[col:]
 
-        # Put the left part into edits (replaces or creates this line)
-        self.edits[ln] = left
-
-        # Shift ONLY edited lines that come AFTER ln
-        shifted = {}
-        for k, v in self.edits.items():
-            if k > ln:
-                shifted[k + 1] = v
-            else:
-                shifted[k] = v
-
-        # Insert new blank line or right side of old line
-        shifted[ln + 1] = right
-
-        self.edits = shifted
-
+        # Update current line
+        if ln in self.inserted_lines:
+            self.inserted_lines[ln] = left
+        else:
+            self.edits[ln] = left
+        
+        # Insert new line
+        self.inserted_lines[ln + 1] = right
+        
+        # Track offset change (1 line inserted)
+        self._add_offset(ln + 1, 1)
+        
         self.cursor_line = ln + 1
         self.cursor_col = 0
+        self.selection.clear()
         self.emit("changed")
 
+    
 
+    def _logical_to_physical(self, logical_line):
+        if not self.file:
+            return logical_line
 
+        if not self.line_offsets:
+            return logical_line
+
+        # Extract only logical_line keys for binary search
+        keys = [lo for lo, _ in self.line_offsets]
+        idx = bisect.bisect_right(keys, logical_line) - 1
+
+        if idx < 0:
+            return logical_line
+
+        _, offset = self.line_offsets[idx]
+        return logical_line - offset
+
+    def _add_offset(self, at_line, delta):
+        # Fast path: empty offsets
+        if not self.line_offsets:
+            self.line_offsets.append((at_line, delta))
+            return
+
+        import bisect
+        keys = [lo for lo, _ in self.line_offsets]
+        pos = bisect.bisect_left(keys, at_line)
+
+        # Case 1: exact match → update
+        if pos < len(self.line_offsets) and self.line_offsets[pos][0] == at_line:
+            old = self.line_offsets[pos][1]
+            new_val = old + delta
+            self.line_offsets[pos] = (at_line, new_val)
+
+            # Update following offsets
+            for i in range(pos + 1, len(self.line_offsets)):
+                lo, off = self.line_offsets[i]
+                self.line_offsets[i] = (lo, off + delta)
+
+            return
+
+        # Case 2: insert new offset
+        # Find previous offset value
+        prev_offset = self.line_offsets[pos-1][1] if pos > 0 else 0
+
+        self.line_offsets.insert(pos, (at_line, prev_offset + delta))
+
+        # Update subsequent offsets
+        for i in range(pos + 1, len(self.line_offsets)):
+            lo, off = self.line_offsets[i]
+            self.line_offsets[i] = (lo, off + delta)
+
+    def insert_newline(self):
+        if self.selection.has_selection():
+            self.delete_selection()
+            return
+
+        ln = self.cursor_line
+        col = self.cursor_col
+
+        old = self.get_line(ln)
+        left  = old[:col]
+        right = old[col:]
+
+        # Update left part
+        if ln in self.inserted_lines:
+            self.inserted_lines[ln] = left
+        else:
+            self.edits[ln] = left
+
+        # ---- SHIFT ONLY VIRTUAL LINES ----
+        # Inserted
+        new_ins = {}
+        for k, v in self.inserted_lines.items():
+            new_ins[k if k <= ln else k+1] = v
+
+        # Edits
+        new_ed = {}
+        for k, v in self.edits.items():
+            new_ed[k if k <= ln else k+1] = v
+
+        # Deleted
+        new_del = set()
+        for k in self.deleted_lines:
+            new_del.add(k if k <= ln else k+1)
+
+        # Insert right half as NEW line at ln+1
+        new_ins[ln + 1] = right
+
+        self.inserted_lines = new_ins
+        self.edits = new_ed
+        self.deleted_lines = new_del
+
+        # Track logical offset (1 new line)
+        self._add_offset(ln + 1, 1)
+
+        # Cursor
+        self.cursor_line = ln + 1
+        self.cursor_col = 0
+        self.selection.clear()
+        self.emit("changed")
 
 # ============================================================
 #   INPUT
@@ -291,50 +771,102 @@ class InputController:
     def __init__(self, view, buf):
         self.view = view
         self.buf = buf
-        self.sel_start = None
-        self.sel_end = None
+        self.dragging = False
+        self.drag_start_line = -1
+        self.drag_start_col = -1
 
     def click(self, ln, col):
         self.buf.set_cursor(ln, col)
-        self.sel_start = (ln, col)
-        self.sel_end = (ln, col)
+        self.buf.selection.clear()
+        self.drag_start_line = ln
+        self.drag_start_col = col
+        self.dragging = False
 
-    def drag(self, ln, col):
-        self.sel_end = (ln, col)
+    def start_drag(self, ln, col):
+        """Start a drag selection"""
+        self.dragging = True
+        self.drag_start_line = ln
+        self.drag_start_col = col
+        self.buf.selection.set_start(ln, col)
+        self.buf.selection.set_end(ln, col)
+        self.buf.set_cursor(ln, col)
 
-    def move_left(self):
+    def update_drag(self, ln, col):
+        """Update drag selection"""
+        if self.dragging:
+            self.buf.selection.set_end(ln, col)
+            self.buf.set_cursor(ln, col)
+
+    def end_drag(self):
+        """End drag selection"""
+        self.dragging = False
+
+    def move_left(self, extend_selection=False):
         b = self.buf
         ln, col = b.cursor_line, b.cursor_col
-        if col > 0:
-            b.set_cursor(ln, col - 1)
+        
+        if not extend_selection and b.selection.has_selection():
+            # Move to start of selection
+            start_ln, start_col, _, _ = b.selection.get_bounds()
+            b.set_cursor(start_ln, start_col, extend_selection)
+        elif col > 0:
+            b.set_cursor(ln, col - 1, extend_selection)
         elif ln > 0:
             prev = b.get_line(ln - 1)
-            b.set_cursor(ln - 1, len(prev))
+            b.set_cursor(ln - 1, len(prev), extend_selection)
 
-    def move_right(self):
+    def move_right(self, extend_selection=False):
         b = self.buf
         ln, col = b.cursor_line, b.cursor_col
         line = b.get_line(ln)
-        if col < len(line):
-            b.set_cursor(ln, col + 1)
+        
+        if not extend_selection and b.selection.has_selection():
+            # Move to end of selection
+            _, _, end_ln, end_col = b.selection.get_bounds()
+            b.set_cursor(end_ln, end_col, extend_selection)
+        elif col < len(line):
+            b.set_cursor(ln, col + 1, extend_selection)
         elif ln + 1 < b.total():
-            b.set_cursor(ln + 1, 0)
+            b.set_cursor(ln + 1, 0, extend_selection)
 
-    def move_up(self):
+    def move_up(self, extend_selection=False):
         b = self.buf
         ln = b.cursor_line
         if ln > 0:
             target = ln - 1
             line = b.get_line(target)
-            b.set_cursor(target, min(b.cursor_col, len(line)))
+            b.set_cursor(target, min(b.cursor_col, len(line)), extend_selection)
 
-    def move_down(self):
+    def move_down(self, extend_selection=False):
         b = self.buf
         ln = b.cursor_line
         if ln + 1 < b.total():
             target = ln + 1
             line = b.get_line(target)
-            b.set_cursor(target, min(b.cursor_col, len(line)))
+            b.set_cursor(target, min(b.cursor_col, len(line)), extend_selection)
+
+    def move_home(self, extend_selection=False):
+        """Move to beginning of line"""
+        b = self.buf
+        b.set_cursor(b.cursor_line, 0, extend_selection)
+
+    def move_end(self, extend_selection=False):
+        """Move to end of line"""
+        b = self.buf
+        line = b.get_line(b.cursor_line)
+        b.set_cursor(b.cursor_line, len(line), extend_selection)
+
+    def move_document_start(self, extend_selection=False):
+        """Move to beginning of document"""
+        self.buf.set_cursor(0, 0, extend_selection)
+
+    def move_document_end(self, extend_selection=False):
+        """Move to end of document"""
+        b = self.buf
+        total = b.total()
+        last_line = total - 1
+        last_line_text = b.get_line(last_line)
+        b.set_cursor(last_line, len(last_line_text), extend_selection)
 
 
 # ============================================================
@@ -360,10 +892,12 @@ class Renderer:
         self.text_h = logical_rect.height
         self.line_h = self.text_h
 
-        # Colors unchanged
+        # Colors
         self.editor_background_color = (0.10, 0.10, 0.10)
-        self.text_foreground_color   = (0.50, 0.50, 0.50)
+        self.text_foreground_color   = (0.90, 0.90, 0.90)
         self.linenumber_foreground_color = (0.60, 0.60, 0.60)
+        self.selection_background_color = (0.2, 0.4, 0.6)
+        self.selection_foreground_color = (1.0, 1.0, 1.0)
 
     def get_text_width(self, cr, text):
         """Calculate actual pixel width of text using Pango"""
@@ -417,8 +951,15 @@ class Renderer:
         ln_width = self.calculate_line_number_width(cr, total)
         max_vis = (alloc.height // self.line_h) + 1
 
+        # Get selection bounds if any
+        has_selection = buf.selection.has_selection()
+        if has_selection:
+            sel_start_line, sel_start_col, sel_end_line, sel_end_col = buf.selection.get_bounds()
+        else:
+            sel_start_line = sel_start_col = sel_end_line = sel_end_col = -1
+
         # ============================================================
-        # DRAW TEXT + LINE NUMBERS
+        # DRAW TEXT + LINE NUMBERS + SELECTION
         # ============================================================
         y = 0
         for ln in range(scroll_line, min(scroll_line + max_vis, total)):
@@ -431,33 +972,78 @@ class Renderer:
             cr.move_to(5, y)
             PangoCairo.show_layout(cr, layout)
 
-            # Line text
+            # Prepare for line text
             is_rtl = line_is_rtl(text)
             layout.set_auto_dir(True)
-            layout.set_text(text, -1)
-
-            cr.set_source_rgb(*self.text_foreground_color)
+            layout.set_text(text if text else " ", -1)  # Use space for empty lines
 
             ink, logical = layout.get_pixel_extents()
             text_w = logical.width
 
-            # FIXED: For RTL text, don't shift the base_x as text grows
-            # Instead, calculate the position based on the available width
+            # Calculate base position
             if is_rtl:
                 available = max(0, alloc.width - ln_width)
-                # When scrolling is 0, align to the right edge
-                # When scrolling, keep the position stable
                 if scroll_x == 0:
-                    # Align to right edge of available space
                     base_x = ln_width + max(0, available - text_w)
                 else:
-                    # Use a fixed position when scrolling
                     base_x = ln_width + available - scroll_x
             else:
                 base_x = ln_width - scroll_x
 
-            cr.move_to(base_x, y)
-            PangoCairo.show_layout(cr, layout)
+            # Draw selection background for this line if needed
+            if has_selection and sel_start_line <= ln <= sel_end_line:
+                # Calculate selection range for this line
+                if ln == sel_start_line and ln == sel_end_line:
+                    # Selection within single line
+                    start_col = sel_start_col
+                    end_col = sel_end_col
+                elif ln == sel_start_line:
+                    # First line of multi-line selection
+                    start_col = sel_start_col
+                    end_col = len(text)
+                elif ln == sel_end_line:
+                    # Last line of multi-line selection
+                    start_col = 0
+                    end_col = sel_end_col
+                else:
+                    # Middle line - select entire line
+                    start_col = 0
+                    end_col = len(text)
+                
+                # Calculate pixel positions for selection
+                if text:
+                    # Get start position
+                    start_byte = visual_byte_index(text, start_col)
+                    strong_pos, _ = layout.get_cursor_pos(start_byte)
+                    sel_start_x = base_x + (strong_pos.x // Pango.SCALE)
+                    
+                    # Get end position
+                    end_byte = visual_byte_index(text, end_col)
+                    strong_pos, _ = layout.get_cursor_pos(end_byte)
+                    sel_end_x = base_x + (strong_pos.x // Pango.SCALE)
+                else:
+                    # Empty line - draw selection from line start
+                    sel_start_x = base_x
+                    sel_end_x = base_x + self.get_text_width(cr, " ")
+                
+                # Draw selection rectangle
+                cr.set_source_rgba(*self.selection_background_color, 0.7)
+                
+                if is_rtl:
+                    # RTL selection might need to be reversed
+                    cr.rectangle(min(sel_start_x, sel_end_x), y, 
+                               abs(sel_end_x - sel_start_x), self.line_h)
+                else:
+                    cr.rectangle(sel_start_x, y, 
+                               sel_end_x - sel_start_x, self.line_h)
+                cr.fill()
+
+            # Draw line text
+            if text:  # Only draw if there's actual text
+                cr.set_source_rgb(*self.text_foreground_color)
+                cr.move_to(base_x, y)
+                layout.set_text(text, -1)
+                PangoCairo.show_layout(cr, layout)
 
             y += self.line_h
 
@@ -474,7 +1060,7 @@ class Renderer:
             pe_l = PangoCairo.create_layout(cr)
             pe_l.set_font_description(self.font)
             pe_l.set_auto_dir(True)
-            pe_l.set_text(line_text, -1)
+            pe_l.set_text(line_text if line_text else " ", -1)
 
             is_rtl = line_is_rtl(line_text)
             text_w, _ = pe_l.get_pixel_size()
@@ -532,7 +1118,7 @@ class Renderer:
             cur_l = PangoCairo.create_layout(cr)
             cur_l.set_font_description(self.font)
             cur_l.set_auto_dir(True)
-            cur_l.set_text(line_text, -1)
+            cur_l.set_text(line_text if line_text else " ", -1)
 
             is_rtl = line_is_rtl(line_text)
             text_w, _ = cur_l.get_pixel_size()
@@ -556,7 +1142,7 @@ class Renderer:
             opacity = 0.5 + 0.5 * math.cos(cursor_phase * math.pi)
             opacity = max(0.0, min(1.0, opacity))
 
-            cr.set_line_width(0.8)
+            cr.set_line_width(1.5)
 
             # Strong caret
             cr.set_source_rgba(1, 1, 1, opacity)
@@ -632,20 +1218,38 @@ class VirtualTextView(Gtk.DrawingArea):
         return b
 
     def pixel_to_column(self, cr, text, px):
+        """Convert pixel position to column index, handling end-of-line"""
+        if not text:
+            return 0
+            
         layout = PangoCairo.create_layout(cr)
         layout.set_font_description(self.renderer.font)
-        layout.set_auto_dir(True)                   # <── NEW
+        layout.set_auto_dir(True)
         layout.set_text(text, -1)
+
+        # Get total text width
+        text_w, _ = layout.get_pixel_size()
+        
+        # If clicking beyond text, return end of line
+        if px >= text_w:
+            return len(text)
 
         # Convert to Pango units
         success, index, trailing = layout.xy_to_index(px * Pango.SCALE, 0)
         if not success:
-            return len(text)
+            # Clicked outside text bounds
+            if px < 0:
+                return 0
+            else:
+                return len(text)
 
         # index = byte offset → convert back to UTF-8 column
         substr = text.encode("utf-8")[:index]
         try:
-            return len(substr.decode("utf-8"))
+            col = len(substr.decode("utf-8"))
+            # Add trailing characters (for clicking on right side of character)
+            col += trailing
+            return min(col, len(text))
         except:
             return len(text)
 
@@ -761,7 +1365,7 @@ class VirtualTextView(Gtk.DrawingArea):
             layout = PangoCairo.create_layout(cr)
             layout.set_font_description(self.renderer.font)
             layout.set_auto_dir(True)
-            layout.set_text(line_text, -1)
+            layout.set_text(line_text if line_text else " ", -1)
 
             # RTL detection (matches Renderer.draw)
             def line_is_rtl(text):
@@ -822,10 +1426,40 @@ class VirtualTextView(Gtk.DrawingArea):
             return True
 
         name = Gdk.keyval_name(keyval)
+        shift_pressed = (state & Gdk.ModifierType.SHIFT_MASK) != 0
+        ctrl_pressed = (state & Gdk.ModifierType.CONTROL_MASK) != 0
+
+        # Ctrl+A - Select All
+        if ctrl_pressed and name == "a":
+            self.buf.select_all()
+            self.queue_draw()
+            return True
+        
+        # Ctrl+C - Copy
+        if ctrl_pressed and name == "c":
+            self.copy_to_clipboard()
+            return True
+        
+        # Ctrl+X - Cut
+        if ctrl_pressed and name == "x":
+            self.cut_to_clipboard()
+            return True
+        
+        # Ctrl+V - Paste
+        if ctrl_pressed and name == "v":
+            self.paste_from_clipboard()
+            return True
 
         # Editing keys
         if name == "BackSpace":
             self.buf.backspace()
+            self.keep_cursor_visible()
+            self.update_im_cursor_location()
+            self.queue_draw()
+            return True
+
+        if name == "Delete":
+            self.buf.delete_key()
             self.keep_cursor_visible()
             self.update_im_cursor_location()
             self.queue_draw()
@@ -838,33 +1472,112 @@ class VirtualTextView(Gtk.DrawingArea):
             self.queue_draw()
             return True
 
-        # Arrow keys
+        # Navigation with selection support
         if name == "Up":
-            self.ctrl.move_up()
+            self.ctrl.move_up(extend_selection=shift_pressed)
             self.keep_cursor_visible()
             self.update_im_cursor_location()
             self.queue_draw()
             return True
         elif name == "Down":
-            self.ctrl.move_down()
+            self.ctrl.move_down(extend_selection=shift_pressed)
             self.keep_cursor_visible()
             self.update_im_cursor_location()
             self.queue_draw()
             return True
         elif name == "Left":
-            self.ctrl.move_left()
+            if ctrl_pressed:
+                # Word navigation (simplified - just jumps more)
+                for _ in range(5):
+                    self.ctrl.move_left(extend_selection=shift_pressed)
+            else:
+                self.ctrl.move_left(extend_selection=shift_pressed)
             self.keep_cursor_visible()
             self.update_im_cursor_location()
             self.queue_draw()
             return True
         elif name == "Right":
-            self.ctrl.move_right()
+            if ctrl_pressed:
+                # Word navigation (simplified)
+                for _ in range(5):
+                    self.ctrl.move_right(extend_selection=shift_pressed)
+            else:
+                self.ctrl.move_right(extend_selection=shift_pressed)
+            self.keep_cursor_visible()
+            self.update_im_cursor_location()
+            self.queue_draw()
+            return True
+        elif name == "Home":
+            if ctrl_pressed:
+                self.ctrl.move_document_start(extend_selection=shift_pressed)
+            else:
+                self.ctrl.move_home(extend_selection=shift_pressed)
+            self.keep_cursor_visible()
+            self.update_im_cursor_location()
+            self.queue_draw()
+            return True
+        elif name == "End":
+            if ctrl_pressed:
+                self.ctrl.move_document_end(extend_selection=shift_pressed)
+            else:
+                self.ctrl.move_end(extend_selection=shift_pressed)
+            self.keep_cursor_visible()
+            self.update_im_cursor_location()
+            self.queue_draw()
+            return True
+        elif name == "Page_Up":
+            # Move up by visible lines
+            visible_lines = self.get_height() // self.renderer.line_h
+            for _ in range(visible_lines):
+                self.ctrl.move_up(extend_selection=shift_pressed)
+            self.keep_cursor_visible()
+            self.update_im_cursor_location()
+            self.queue_draw()
+            return True
+        elif name == "Page_Down":
+            # Move down by visible lines
+            visible_lines = self.get_height() // self.renderer.line_h
+            for _ in range(visible_lines):
+                self.ctrl.move_down(extend_selection=shift_pressed)
             self.keep_cursor_visible()
             self.update_im_cursor_location()
             self.queue_draw()
             return True
 
         return False
+
+    def copy_to_clipboard(self):
+        """Copy selected text to clipboard"""
+        text = self.buf.get_selected_text()
+        if text:
+            clipboard = self.get_clipboard()
+            clipboard.set_content(Gdk.ContentProvider.new_for_value(text))
+
+    def cut_to_clipboard(self):
+        """Cut selected text to clipboard"""
+        text = self.buf.get_selected_text()
+        if text:
+            clipboard = self.get_clipboard()
+            clipboard.set_content(Gdk.ContentProvider.new_for_value(text))
+            self.buf.delete_selection()
+            self.queue_draw()
+
+    def paste_from_clipboard(self):
+        """Paste text from clipboard"""
+        clipboard = self.get_clipboard()
+        
+        def paste_ready(clipboard, result):
+            try:
+                text = clipboard.read_text_finish(result)
+                if text:
+                    self.buf.insert_text(text)
+                    self.keep_cursor_visible()
+                    self.update_im_cursor_location()
+                    self.queue_draw()
+            except Exception as e:
+                print(f"Paste error: {e}")
+        
+        clipboard.read_text_async(None, paste_ready)
 
     def install_keys(self):
         key = Gtk.EventControllerKey()
@@ -883,14 +1596,21 @@ class VirtualTextView(Gtk.DrawingArea):
     def install_mouse(self):
         g = Gtk.GestureClick()
         g.connect("pressed", self.on_click)
+        g.connect("released", self.on_release)
         self.add_controller(g)
 
         d = Gtk.GestureDrag()
-        d.connect("drag-update", self.on_drag)
+        d.connect("drag-begin", self.on_drag_begin)
+        d.connect("drag-update", self.on_drag_update)
+        d.connect("drag-end", self.on_drag_end)
         self.add_controller(d)
 
     def on_click(self, g, n, x, y):
         self.grab_focus()
+
+        # Get modifiers
+        modifiers = g.get_current_event_state()
+        shift_pressed = (modifiers & Gdk.ModifierType.SHIFT_MASK) != 0
 
         # Temporary Pango context
         surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
@@ -901,48 +1621,170 @@ class VirtualTextView(Gtk.DrawingArea):
         ln = self.scroll_line + int(y // self.renderer.line_h)
         ln = max(0, min(ln, self.buf.total() - 1))
 
-        col_pixels = x - ln_width + self.scroll_x
+        # Calculate column position
+        import unicodedata
+        
+        text = self.buf.get_line(ln)
+        
+        # Create layout for this line
+        layout = PangoCairo.create_layout(cr)
+        layout.set_font_description(self.renderer.font)
+        layout.set_auto_dir(True)
+        layout.set_text(text if text else " ", -1)
+        
+        # Determine if RTL
+        def line_is_rtl(text):
+            for ch in text:
+                t = unicodedata.bidirectional(ch)
+                if t in ("L", "LRE", "LRO"):
+                    return False
+                if t in ("R", "AL", "RLE", "RLO"):
+                    return True
+            return False
+        
+        is_rtl = line_is_rtl(text)
+        text_w, _ = layout.get_pixel_size()
+        
+        # Calculate base_x matching the renderer
+        if is_rtl:
+            available = max(0, self.get_width() - ln_width)
+            if self.scroll_x == 0:
+                base_x = ln_width + max(0, available - text_w)
+            else:
+                base_x = ln_width + available - self.scroll_x
+        else:
+            base_x = ln_width - self.scroll_x
+        
+        # Calculate relative pixel position from base
+        col_pixels = x - base_x
         col_pixels = max(0, col_pixels)
 
-        text = self.buf.get_line(ln)
-
-        # Binary search → column index
+        # Convert pixel to column
         col = self.pixel_to_column(cr, text, col_pixels)
-
-
         col = max(0, min(col, len(text)))
-        self.ctrl.click(ln, col)
+
+        # Handle shift-click for selection
+        if shift_pressed:
+            # Extend selection from current cursor position
+            if not self.buf.selection.active:
+                self.buf.selection.set_start(self.buf.cursor_line, self.buf.cursor_col)
+            self.buf.selection.set_end(ln, col)
+            self.buf.set_cursor(ln, col, extend_selection=True)
+        else:
+            # Normal click - clear selection and move cursor
+            self.ctrl.click(ln, col)
+        
         self.queue_draw()
 
-    def on_drag(self, g, dx, dy):
-        ok, sx, sy = g.get_start_point()
-        if not ok:
-            return
+    def on_release(self, g, n, x, y):
+        """Handle mouse button release"""
+        self.ctrl.end_drag()
 
-        # Calculate line number width dynamically
+    def on_drag_begin(self, g, x, y):
+        """Start drag selection"""
+        # Calculate position
         surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
         cr = cairo.Context(surface)
         ln_width = self.renderer.calculate_line_number_width(cr, self.buf.total())
 
-        ln = self.scroll_line + int((sy + dy) // self.renderer.line_h)
+        ln = self.scroll_line + int(y // self.renderer.line_h)
         ln = max(0, min(ln, self.buf.total() - 1))
 
-        col_pixels = (sx + dx) - ln_width + self.scroll_x
-        if col_pixels < 0:
-            col = 0
+        # Calculate column (similar to on_click)
+        import unicodedata
+        text = self.buf.get_line(ln)
+        
+        layout = PangoCairo.create_layout(cr)
+        layout.set_font_description(self.renderer.font)
+        layout.set_auto_dir(True)
+        layout.set_text(text if text else " ", -1)
+        
+        def line_is_rtl(text):
+            for ch in text:
+                t = unicodedata.bidirectional(ch)
+                if t in ("L", "LRE", "LRO"):
+                    return False
+                if t in ("R", "AL", "RLE", "RLO"):
+                    return True
+            return False
+        
+        is_rtl = line_is_rtl(text)
+        text_w, _ = layout.get_pixel_size()
+        
+        if is_rtl:
+            available = max(0, self.get_width() - ln_width)
+            if self.scroll_x == 0:
+                base_x = ln_width + max(0, available - text_w)
+            else:
+                base_x = ln_width + available - self.scroll_x
         else:
-            line_text = self.buf.get_line(ln)
-            # Binary search to find column from pixel position
-            col = 0
-            for i in range(len(line_text) + 1):
-                text_width = self.renderer.get_text_width(cr, line_text[:i])
-                if text_width > col_pixels:
-                    break
-                col = i
+            base_x = ln_width - self.scroll_x
+        
+        col_pixels = x - base_x
+        col_pixels = max(0, col_pixels)
+        col = self.pixel_to_column(cr, text, col_pixels)
+        col = max(0, min(col, len(text)))
 
-        col = max(0, min(col, len(self.buf.get_line(ln))))
-        self.ctrl.drag(ln, col)
+        self.ctrl.start_drag(ln, col)
         self.queue_draw()
+
+    def on_drag_update(self, g, dx, dy):
+        """Update drag selection"""
+        ok, sx, sy = g.get_start_point()
+        if not ok:
+            return
+
+        # Calculate current position
+        surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
+        cr = cairo.Context(surface)
+        ln_width = self.renderer.calculate_line_number_width(cr, self.buf.total())
+
+        current_y = sy + dy
+        ln = self.scroll_line + int(current_y // self.renderer.line_h)
+        ln = max(0, min(ln, self.buf.total() - 1))
+
+        # Calculate column
+        import unicodedata
+        text = self.buf.get_line(ln)
+        
+        layout = PangoCairo.create_layout(cr)
+        layout.set_font_description(self.renderer.font)
+        layout.set_auto_dir(True)
+        layout.set_text(text if text else " ", -1)
+        
+        def line_is_rtl(text):
+            for ch in text:
+                t = unicodedata.bidirectional(ch)
+                if t in ("L", "LRE", "LRO"):
+                    return False
+                if t in ("R", "AL", "RLE", "RLO"):
+                    return True
+            return False
+        
+        is_rtl = line_is_rtl(text)
+        text_w, _ = layout.get_pixel_size()
+        
+        if is_rtl:
+            available = max(0, self.get_width() - ln_width)
+            if self.scroll_x == 0:
+                base_x = ln_width + max(0, available - text_w)
+            else:
+                base_x = ln_width + available - self.scroll_x
+        else:
+            base_x = ln_width - self.scroll_x
+        
+        current_x = sx + dx
+        col_pixels = current_x - base_x
+        col_pixels = max(0, col_pixels)
+        col = self.pixel_to_column(cr, text, col_pixels)
+        col = max(0, min(col, len(text)))
+
+        self.ctrl.update_drag(ln, col)
+        self.queue_draw()
+
+    def on_drag_end(self, g, dx, dy):
+        """End drag selection"""
+        self.ctrl.end_drag()
 
     def keep_cursor_visible(self):
         import unicodedata
@@ -967,7 +1809,7 @@ class VirtualTextView(Gtk.DrawingArea):
         layout = PangoCairo.create_layout(cr)
         layout.set_font_description(self.renderer.font)
         layout.set_auto_dir(True)
-        layout.set_text(line_text, -1)
+        layout.set_text(line_text if line_text else " ", -1)
 
         def line_is_rtl(text):
             for ch in text:
@@ -1201,12 +2043,13 @@ class LoadingDialog(Adw.Window):
 class EditorWindow(Adw.ApplicationWindow):
     def __init__(self, app):
         super().__init__(application=app)
-        self.set_title("Virtual Text Editor")
+        self.set_title("Virtual Text Editor - Advanced Selection")
         self.set_default_size(1000, 700)
 
         self.buf = VirtualBuffer()
         self.view = VirtualTextView(self.buf)
         self.scrollbar = VirtualScrollbar(self.view)
+        self.buf.connect("changed", self.on_buffer_changed)
 
         layout = Adw.ToolbarView()
         self.set_content(layout)
@@ -1223,6 +2066,11 @@ class EditorWindow(Adw.ApplicationWindow):
         box.append(self.scrollbar)
 
         layout.set_content(box)
+
+    def on_buffer_changed(self, *_):
+        self.view.queue_draw()
+        self.scrollbar.queue_draw()
+
 
     def open_file(self, *_):
         dialog = Gtk.FileDialog()
