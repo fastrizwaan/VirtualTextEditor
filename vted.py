@@ -1992,7 +1992,7 @@ class VirtualTextView(Gtk.DrawingArea):
             self.queue_draw()
 
     def paste_from_clipboard(self):
-        """Paste text from clipboard"""
+        """Paste text from clipboard with better error handling"""
         clipboard = self.get_clipboard()
         
         def paste_ready(clipboard, result):
@@ -2004,9 +2004,46 @@ class VirtualTextView(Gtk.DrawingArea):
                     self.update_im_cursor_location()
                     self.queue_draw()
             except Exception as e:
-                print(f"Paste error: {e}")
+                error_msg = str(e)
+                # Silently ignore "No compatible transfer format" errors
+                # This happens when clipboard contains non-text data (images, etc.)
+                if "No compatible transfer format" not in error_msg:
+                    print(f"Paste error: {e}")
+                # Optionally try to get text in a different way
+                self.try_paste_fallback()
         
         clipboard.read_text_async(None, paste_ready)
+
+    def try_paste_fallback(self):
+        """Fallback method to try getting clipboard text"""
+        try:
+            clipboard = self.get_clipboard()
+            
+            # Try to get formats available
+            formats = clipboard.get_formats()
+            
+            # Check if text is available in any format
+            if formats.contain_mime_type("text/plain"):
+                # Try reading as plain text with UTF-8 encoding
+                def read_ready(clipboard, result):
+                    try:
+                        success, data = clipboard.read_finish(result)
+                        if success and data:
+                            # Try to decode as UTF-8
+                            text = data.decode('utf-8', errors='ignore')
+                            if text:
+                                self.buf.insert_text(text)
+                                self.keep_cursor_visible()
+                                self.update_im_cursor_location()
+                                self.queue_draw()
+                    except Exception as e:
+                        # Silently fail - clipboard probably contains non-text data
+                        pass
+                
+                clipboard.read_async(["text/plain"], 0, None, read_ready)
+        except Exception as e:
+            # Silently fail - this is just a fallback attempt
+            pass
 
     def install_keys(self):
         key = Gtk.EventControllerKey()
