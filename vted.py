@@ -1869,6 +1869,14 @@ class VirtualTextView(Gtk.DrawingArea):
         if ctrl_pressed and name == "v":
             self.paste_from_clipboard()
             return True
+        
+        # Tab key - insert tab character
+        if name == "Tab":
+            self.buf.insert_text("\t")
+            self.keep_cursor_visible()
+            self.update_im_cursor_location()
+            self.queue_draw()
+            return True
 
         # Editing keys
         if name == "BackSpace":
