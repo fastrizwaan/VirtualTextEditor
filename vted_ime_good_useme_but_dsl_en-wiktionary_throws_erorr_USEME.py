@@ -1198,54 +1198,11 @@ class Renderer:
         return width + 15  # Add padding (5px left + 10px right margin)
 
     def draw(self, cr, alloc, buf, scroll_line, scroll_x,
-            cursor_visible=True, cursor_phase=0.0):
+             cursor_visible=True, cursor_phase=0.0):
 
         import math
-        import unicodedata
-        
-        # If we need a full width scan (e.g., after loading a file), do it first
-        if self.needs_full_width_scan and buf:
-            self.needs_full_width_scan = False
-            layout = PangoCairo.create_layout(cr)
-            layout.set_font_description(self.font)
-            layout.set_auto_dir(True)
-            
-            total = buf.total()
-            ln_width = self.calculate_line_number_width(cr, total)
-            max_width = 0
-            
-            # Scan first 1000 lines to get a quick estimate
-            scan_limit = min(1000, total)
-            for ln in range(scan_limit):
-                text = buf.get_line(ln)
-                if text:
-                    layout.set_text(text, -1)
-                    ink, logical = layout.get_pixel_extents()
-                    text_w = logical.width
-                    line_total_width = ln_width + text_w
-                    if line_total_width > max_width:
-                        max_width = line_total_width
-            
-            self.max_line_width = max_width
 
-        # Base-direction detection
-        def line_is_rtl(text):
-            for ch in text:
-                t = unicodedata.bidirectional(ch)
-                if t in ("L", "LRE", "LRO"):
-                    return False
-                if t in ("R", "AL", "RLE", "RLO"):
-                    return True
-            return False
-
-        # Visual UTF-8 byte index for Pango (cluster-correct)
-        def visual_byte_index(text, col):
-            b = 0
-            for ch in text[:col]:
-                b += len(ch.encode("utf-8"))
-            return b
-
-        # Background
+        # --- background ---
         cr.set_source_rgb(*self.editor_background_color)
         cr.paint()
 
@@ -1253,291 +1210,208 @@ class Renderer:
         layout.set_font_description(self.font)
         layout.set_auto_dir(True)
 
+        # --- helper: get Pango paragraph direction and layout ---
+        def bidi_info(text):
+            layout.set_text(text if text else " ", -1)
+            ctx = layout.get_context()
+            base_dir = ctx.get_base_dir()   # Pango.Direction.LTR/RTL
+            ink, logical = layout.get_pixel_extents()
+            return base_dir, logical.width, layout
+
+        # --- helper: utf-8 → byte index ---
+        def visual_byte_index(text, col):
+            b = 0
+            for ch in text[:col]:
+                b += len(ch.encode("utf-8"))
+            return b
+
         total = buf.total()
         ln_width = self.calculate_line_number_width(cr, total)
         max_vis = (alloc.height // self.line_h) + 1
 
-        # Get selection bounds if any
-        has_selection = buf.selection.has_selection()
-        if has_selection:
+        # --- selection bounds ---
+        if buf.selection.has_selection():
             sel_start_line, sel_start_col, sel_end_line, sel_end_col = buf.selection.get_bounds()
         else:
             sel_start_line = sel_start_col = sel_end_line = sel_end_col = -1
 
-        # ============================================================
-        # DRAW TEXT + LINE NUMBERS + SELECTION
-        # ============================================================
+        # --- draw loop ---
         y = 0
-        max_width_seen = self.max_line_width  # Start with existing max, don't reset
-        
+        max_width_seen = self.max_line_width
+
         for ln in range(scroll_line, min(scroll_line + max_vis, total)):
             text = buf.get_line(ln)
 
-            # Line number (LTR always, RIGHT ALIGNED)
+            # -------------------------------
+            # LINE NUMBER
+            # -------------------------------
             layout.set_auto_dir(False)
-            line_num_str = str(ln + 1)
-            layout.set_text(line_num_str, -1)
-            
-            # Get the width of this line number
-            line_num_width, _ = layout.get_pixel_size()
-            
-            # Right align: position at (ln_width - line_num_width - right_padding)
-            line_num_x = ln_width - line_num_width - 10  # 10px right padding
-            
+            layout.set_text(str(ln + 1), -1)
+            lw, _ = layout.get_pixel_size()
             cr.set_source_rgb(*self.linenumber_foreground_color)
-            cr.move_to(line_num_x, y)
+            cr.move_to(ln_width - lw - 10, y)
             PangoCairo.show_layout(cr, layout)
 
-            # Prepare for line text
-            is_rtl = line_is_rtl(text)
-            layout.set_auto_dir(True)
-            layout.set_text(text if text else " ", -1)  # Use space for empty lines
+            # -------------------------------
+            # BIDI PARAGRAPH INFO
+            # -------------------------------
+            base_dir, text_w, layout = bidi_info(text)
 
-            ink, logical = layout.get_pixel_extents()
-            text_w = logical.width
-            
-            # Track maximum width for horizontal scrollbar
-            line_total_width = ln_width + text_w
-            if line_total_width > max_width_seen:
-                max_width_seen = line_total_width
+            # max width for scrollbar
+            line_total_w = ln_width + text_w
+            if line_total_w > max_width_seen:
+                max_width_seen = line_total_w
 
-            # Calculate base position
-            if is_rtl:
+            # -------------------------------
+            # BASE X (gedit-correct)
+            # -------------------------------
+            if base_dir == Pango.Direction.RTL:
                 available = max(0, alloc.width - ln_width)
-                if scroll_x == 0:
-                    base_x = ln_width + max(0, available - text_w)
-                else:
-                    base_x = ln_width + available - scroll_x
+                base_x = ln_width + max(0, available - text_w) - scroll_x
             else:
                 base_x = ln_width - scroll_x
-            
-            # Set clipping region to prevent text from overlapping line numbers
+
+            # -------------------------------
+            # CLIP TEXT AREA
+            # -------------------------------
             cr.save()
             cr.rectangle(ln_width, y, alloc.width - ln_width, self.line_h)
             cr.clip()
 
-            # Draw selection background for this line if needed
-            # Draw selection background for this line if needed
-            # Draw selection background for this line if needed
-            if has_selection and sel_start_line <= ln <= sel_end_line:
-                # Calculate selection range for this line
+            # -------------------------------
+            # SELECTION DRAWING (using Pango)
+            # -------------------------------
+            if sel_start_line <= ln <= sel_end_line:
                 if ln == sel_start_line and ln == sel_end_line:
-                    # Selection within single line
                     start_col = sel_start_col
                     end_col = sel_end_col
                 elif ln == sel_start_line:
-                    # First line of multi-line selection - select to end + newline indicator
                     start_col = sel_start_col
-                    end_col = len(text) + 1  # +1 to include newline visual
+                    end_col = len(text) + 1
                 elif ln == sel_end_line:
-                    # Last line of multi-line selection - select from start to end_col
                     start_col = 0
                     end_col = sel_end_col
                 else:
-                    # Middle line - select entire line + newline indicator
                     start_col = 0
-                    end_col = len(text) + 1  # +1 to include newline visual
-                
-                # Calculate pixel positions for selection
-                if text or start_col == 0:
-                    # Get start position
-                    if start_col <= len(text):
-                        start_byte = visual_byte_index(text, min(start_col, len(text)))
-                        strong_pos, _ = layout.get_cursor_pos(start_byte)
-                        sel_start_x = base_x + (strong_pos.x // Pango.SCALE)
-                    else:
-                        sel_start_x = base_x
-                    
-                    # Get end position
-                    if end_col <= len(text):
-                        end_byte = visual_byte_index(text, end_col)
-                        strong_pos, _ = layout.get_cursor_pos(end_byte)
-                        sel_end_x = base_x + (strong_pos.x // Pango.SCALE)
-                    else:
-                        # Include newline indicator - extend to viewport end
-                        if text:
-                            end_byte = visual_byte_index(text, len(text))
-                            strong_pos, _ = layout.get_cursor_pos(end_byte)
-                            sel_end_x = base_x + (strong_pos.x // Pango.SCALE)
-                        else:
-                            sel_end_x = base_x
-                        
-                        # For lines with newline selected, we'll extend to viewport later
-                        text_end_x = sel_end_x
+                    end_col = len(text) + 1
+
+                # start pixel
+                if start_col <= len(text):
+                    sb = visual_byte_index(text, start_col)
+                    spos, _ = layout.get_cursor_pos(sb)
+                    sx = base_x + (spos.x // Pango.SCALE)
                 else:
-                    # Empty line with selection
-                    sel_start_x = base_x
-                    text_end_x = base_x
-                    sel_end_x = base_x
-                
-                # Draw main text selection rectangle
+                    sx = base_x
+
+                # end pixel
                 if end_col <= len(text):
-                    # Normal selection within text
-                    cr.set_source_rgba(*self.selection_background_color, 0.7)
-                    if is_rtl:
-                        cr.rectangle(min(sel_start_x, sel_end_x), y, 
-                                abs(sel_end_x - sel_start_x), self.line_h)
-                    else:
-                        cr.rectangle(sel_start_x, y, 
-                                sel_end_x - sel_start_x, self.line_h)
-                    cr.fill()
+                    eb = visual_byte_index(text, end_col)
+                    epos, _ = layout.get_cursor_pos(eb)
+                    ex = base_x + (epos.x // Pango.SCALE)
                 else:
-                    # Selection includes newline - draw text selection + newline indicator
-                    # Draw text selection part
-                    if text:
-                        cr.set_source_rgba(*self.selection_background_color, 0.7)
-                        if is_rtl:
-                            cr.rectangle(min(sel_start_x, text_end_x), y, 
-                                    abs(text_end_x - sel_start_x), self.line_h)
-                        else:
-                            cr.rectangle(sel_start_x, y, 
-                                    text_end_x - sel_start_x, self.line_h)
-                        cr.fill()
-                    
-                    # Draw newline indicator extending to viewport edge
-                    newline_start_x = text_end_x if text else ln_width
-                    newline_end_x = alloc.width  # Extend to viewport edge
-                    
-                    # Use slightly darker/different shade for newline area
-                    cr.set_source_rgba(*self.selection_background_color, 0.7)
-                    cr.rectangle(newline_start_x, y, 
-                            newline_end_x - newline_start_x, self.line_h)
+                    # newline selection → to viewport end
+                    eb = visual_byte_index(text, len(text))
+                    epos, _ = layout.get_cursor_pos(eb)
+                    ex = base_x + (epos.x // Pango.SCALE)
+                    newline_start = ex
+                    newline_end   = alloc.width
+
+                # rectangle
+                cr.set_source_rgba(*self.selection_background_color, 0.7)
+                cr.rectangle(min(sx, ex), y, abs(ex - sx), self.line_h)
+                cr.fill()
+
+                # newline area (extended)
+                if end_col > len(text):
+                    cr.rectangle(newline_start, y, newline_end - newline_start, self.line_h)
                     cr.fill()
-                    
-                    # Draw a subtle vertical line at the end of actual text to mark the newline position
-                    # Don't really need it disabled it with 0.0
-                    if text:
-                        cr.set_source_rgba(*self.selection_foreground_color, 0.0)
-                        cr.set_line_width(1)
-                        cr.move_to(text_end_x, y)
-                        cr.line_to(text_end_x, y + self.line_h)
-                        cr.stroke()
 
-            # Draw line text
-            if text:  # Only draw if there's actual text
-                cr.set_source_rgb(*self.text_foreground_color)
-                cr.move_to(base_x, y)
-                layout.set_text(text, -1)
-                PangoCairo.show_layout(cr, layout)
-            
-            # Restore clipping region
+            # -------------------------------
+            # DRAW TEXT
+            # -------------------------------
+            cr.set_source_rgb(*self.text_foreground_color)
+            cr.move_to(base_x, y)
+            layout.set_text(text if text else " ", -1)
+            PangoCairo.show_layout(cr, layout)
+
             cr.restore()
-
             y += self.line_h
 
-        # Update tracked maximum line width for horizontal scrollbar
+        # --- update scrollbar width ---
         self.max_line_width = max_width_seen
-        
+
         # ============================================================
         # PREEDIT (IME)
         # ============================================================
-        cl, cc = buf.cursor_line, buf.cursor_col
+        cl = buf.cursor_line
+        cc = buf.cursor_col
         line_visible = (scroll_line <= cl < scroll_line + max_vis)
 
-        if hasattr(buf, "preedit_string") and buf.preedit_string and line_visible:
+        if getattr(buf, "preedit_string", None) and line_visible:
             py = (cl - scroll_line) * self.line_h
             line_text = buf.get_line(cl)
 
-            pe_l = PangoCairo.create_layout(cr)
-            pe_l.set_font_description(self.font)
-            pe_l.set_auto_dir(True)
-            pe_l.set_text(line_text if line_text else " ", -1)
+            base_dir, text_w, pe_l = bidi_info(line_text)
 
-            is_rtl = line_is_rtl(line_text)
-            text_w, _ = pe_l.get_pixel_size()
-
-            if is_rtl:
+            # base x
+            if base_dir == Pango.Direction.RTL:
                 available = max(0, alloc.width - ln_width)
-                if scroll_x == 0:
-                    base_x = ln_width + max(0, available - text_w)
-                else:
-                    base_x = ln_width + available - scroll_x
+                base_x = ln_width + max(0, available - text_w) - scroll_x
             else:
                 base_x = ln_width - scroll_x
 
             byte_index = visual_byte_index(line_text, cc)
-            strong_pos, weak_pos = pe_l.get_cursor_pos(byte_index)
-            cursor_x = strong_pos.x // Pango.SCALE
-            px = base_x + cursor_x
+            spos, _ = pe_l.get_cursor_pos(byte_index)
+            px = base_x + (spos.x // Pango.SCALE)
 
-            # Preedit text
+            # draw preedit text
             pe_l.set_text(buf.preedit_string, -1)
             cr.set_source_rgba(1, 1, 1, 0.7)
             cr.move_to(px, py)
             PangoCairo.show_layout(cr, pe_l)
 
             uw, _ = pe_l.get_pixel_size()
-            cr.set_line_width(1.0)
+            cr.set_line_width(1)
             cr.move_to(px, py + self.text_h)
             cr.line_to(px + uw, py + self.text_h)
             cr.stroke()
 
-            # Preedit cursor
-            if hasattr(buf, "preedit_cursor"):
-                pc = buf.preedit_cursor
-
-                pe_l2 = PangoCairo.create_layout(cr)
-                pe_l2.set_font_description(self.font)
-                pe_l2.set_auto_dir(True)
-                pe_l2.set_text(buf.preedit_string, -1)
-
-                byte_index2 = visual_byte_index(buf.preedit_string, pc)
-                strong_pos2, weak_pos2 = pe_l2.get_cursor_pos(byte_index2)
-                cw = strong_pos2.x // Pango.SCALE
-
-                cr.set_line_width(1.0)
-                cr.move_to(px + cw, py)
-                cr.line_to(px + cw, py + self.text_h)
-                cr.stroke()
-
         # ============================================================
-        # NORMAL CURSOR (strong + weak caret, gedit-style)
+        # CURSOR
         # ============================================================
         if cursor_visible and line_visible:
             line_text = buf.get_line(cl)
 
-            cur_l = PangoCairo.create_layout(cr)
-            cur_l.set_font_description(self.font)
-            cur_l.set_auto_dir(True)
-            cur_l.set_text(line_text if line_text else " ", -1)
+            base_dir, text_w, cur_l = bidi_info(line_text)
 
-            is_rtl = line_is_rtl(line_text)
-            text_w, _ = cur_l.get_pixel_size()
-
-            if is_rtl:
+            if base_dir == Pango.Direction.RTL:
                 available = max(0, alloc.width - ln_width)
-                if scroll_x == 0:
-                    base_x = ln_width + max(0, available - text_w)
-                else:
-                    base_x = ln_width + available - scroll_x
+                base_x = ln_width + max(0, available - text_w) - scroll_x
             else:
                 base_x = ln_width - scroll_x
 
             byte_index = visual_byte_index(line_text, cc)
-            strong_pos, weak_pos = cur_l.get_cursor_pos(byte_index)
+            spos, wpos = cur_l.get_cursor_pos(byte_index)
 
-            cx_strong = base_x + strong_pos.x // Pango.SCALE
-            cx_weak   = base_x + weak_pos.x   // Pango.SCALE
+            cx_strong = base_x + (spos.x // Pango.SCALE)
+            cx_weak   = base_x + (wpos.x // Pango.SCALE)
             cy = (cl - scroll_line) * self.line_h
 
             opacity = 0.5 + 0.5 * math.cos(cursor_phase * math.pi)
             opacity = max(0.0, min(1.0, opacity))
 
             cr.set_line_width(1.5)
-
-            # Strong caret
             cr.set_source_rgba(1, 1, 1, opacity)
             cr.move_to(cx_strong + 0.4, cy)
             cr.line_to(cx_strong + 0.4, cy + self.text_h)
             cr.stroke()
 
-            # Weak caret (ghost-carets) - only show if different from strong AND text is actually bidirectional
-            if weak_pos.x != strong_pos.x and is_rtl:
-                cr.set_source_rgba(1, 1, 1, opacity * 0.45)
+            # show weak caret only for bidi
+            if wpos.x != spos.x:
+                cr.set_source_rgba(1, 1, 1, opacity * 0.4)
                 cr.move_to(cx_weak + 0.4, cy)
                 cr.line_to(cx_weak + 0.4, cy + self.text_h)
                 cr.stroke()
-
 
 # ============================================================
 #   VIEW
@@ -2468,91 +2342,98 @@ class VirtualTextView(Gtk.DrawingArea):
 
 
     def keep_cursor_visible(self):
-        """Smooth, non-jumping cursor tracking for horizontal and vertical scroll."""
         cl = self.buf.cursor_line
         cc = self.buf.cursor_col
 
-        alloc_w = self.get_width()
-        alloc_h = self.get_height()
-        if alloc_w <= 0 or alloc_h <= 0:
+        W = self.get_width()
+        H = self.get_height()
+        if W <= 0 or H <= 0:
             return
 
-        # ----- compute line height window -----
+        # -------- vertical autoscroll --------
         line_h = self.renderer.line_h
-        visible_lines = alloc_h // line_h
+        vis = H // line_h
 
-        # Vertical auto-scroll
         if cl < self.scroll_line:
             self.scroll_line = cl
             self.vadj.set_value(self.scroll_line)
-        elif cl >= self.scroll_line + visible_lines:
-            self.scroll_line = cl - visible_lines + 1
+        elif cl >= self.scroll_line + vis:
+            self.scroll_line = cl - vis + 1
             if self.scroll_line < 0:
                 self.scroll_line = 0
             self.vadj.set_value(self.scroll_line)
 
-        # ----- compute cursor X inside renderer -----
-        line_text = self.buf.get_line(cl)
+        # -------- compute exact Pango cursor pixel pos --------
+        text = self.buf.get_line(cl)
 
-        # Build Pango layout to get exact pixel position
         surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
         cr = cairo.Context(surface)
         layout = PangoCairo.create_layout(cr)
         layout.set_font_description(self.renderer.font)
         layout.set_auto_dir(True)
-        layout.set_text(line_text if line_text else " ", -1)
+        layout.set_text(text if text else " ", -1)
 
-        # RTL detection (mirrors renderer.draw)
-        import unicodedata
-        def is_rtl(text):
-            for ch in text:
-                t = unicodedata.bidirectional(ch)
-                if t in ("R", "AL", "RLE", "RLO"):
-                    return True
-                if t in ("L", "LRE", "LRO"):
-                    return False
-            return False
+        # paragraph direction
+        ctx = layout.get_context()
+        base_dir = ctx.get_base_dir()
 
-        rtl = is_rtl(line_text)
-        byte_index = self.visual_byte_index(line_text, cc)
-        strong_pos, weak_pos = layout.get_cursor_pos(byte_index)
-        cursor_px = strong_pos.x // Pango.SCALE
+        byte_index = self.visual_byte_index(text, cc)
+        strong, weak = layout.get_cursor_pos(byte_index)
+        cursor_px = strong.x // Pango.SCALE
 
-        # Calculate line number gutter width
-        ln_w = self.renderer.calculate_line_number_width(cr, self.buf.total())
+        # line number gutter
+        lnw = self.renderer.calculate_line_number_width(cr, self.buf.total())
 
-        # Calculate base X exactly as renderer.draw does
+        # text width
         text_w, _ = layout.get_pixel_size()
-        if rtl:
-            available = max(0, alloc_w - ln_w)
-            if self.scroll_x == 0:
-                base_x = ln_w + max(0, available - text_w)
-            else:
-                base_x = ln_w + available - self.scroll_x
+
+        # -------- identical base_x as renderer --------
+        if base_dir == Pango.Direction.RTL:
+            available = max(0, W - lnw)
+            base_x = lnw + max(0, available - text_w) - self.scroll_x
         else:
-            base_x = ln_w - self.scroll_x
+            base_x = lnw - self.scroll_x
 
         cursor_screen_x = base_x + cursor_px
 
-        # ----- Horizontal auto-scroll (NON-JUMPING FIX) -----
-        # Add a 2px comfort margin
-        left_margin = ln_w + 2
-        right_margin = alloc_w - 2
+        # -------- horizontal autoscroll --------
+        left_margin  = lnw + 2
+        right_margin = W - 2
 
-        if cursor_screen_x < left_margin:
-            # Smooth left scroll
-            self.scroll_x -= (left_margin - cursor_screen_x)
-            if self.scroll_x < 0:
-                self.scroll_x = 0
-            self.hadj.set_value(self.scroll_x)
+        # RTL logic is symmetric but reversed
+        if base_dir == Pango.Direction.RTL:
 
-        elif cursor_screen_x > right_margin:
-            # Smooth right scroll
-            self.scroll_x += (cursor_screen_x - right_margin)
-            max_hscroll = max(0, self.renderer.max_line_width - alloc_w)
-            if self.scroll_x > max_hscroll:
-                self.scroll_x = max_hscroll
-            self.hadj.set_value(self.scroll_x)
+            # cursor visually too left → increase scroll_x
+            if cursor_screen_x < left_margin:
+                self.scroll_x += (left_margin - cursor_screen_x)
+                max_x = max(0, self.renderer.max_line_width - W)
+                if self.scroll_x > max_x:
+                    self.scroll_x = max_x
+                self.hadj.set_value(self.scroll_x)
+
+            # cursor visually too right → decrease scroll_x
+            elif cursor_screen_x > right_margin:
+                self.scroll_x -= (cursor_screen_x - right_margin)
+                if self.scroll_x < 0:
+                    self.scroll_x = 0
+                self.hadj.set_value(self.scroll_x)
+
+        else:
+            # LTR normal
+            if cursor_screen_x < left_margin:
+                self.scroll_x -= (left_margin - cursor_screen_x)
+                if self.scroll_x < 0:
+                    self.scroll_x = 0
+                self.hadj.set_value(self.scroll_x)
+
+            elif cursor_screen_x > right_margin:
+                self.scroll_x += (cursor_screen_x - right_margin)
+                max_x = max(0, self.renderer.max_line_width - W)
+                if self.scroll_x > max_x:
+                    self.scroll_x = max_x
+                self.hadj.set_value(self.scroll_x)
+
+
 
 
 
@@ -2606,15 +2487,7 @@ class VirtualTextView(Gtk.DrawingArea):
             self.cursor_phase   # NEW
         )
         # Update scrollbars after drawing (this updates visibility based on content)
-        #GLib.idle_add(lambda: (self.update_scrollbar(), False))
-
-
-
-
-
-
-
-
+        GLib.idle_add(lambda: (self.update_scrollbar(), False))
 
 # ============================================================
 #   LOADING DIALOG
@@ -2794,9 +2667,9 @@ class EditorWindow(Adw.ApplicationWindow):
                 self.view.file_loaded()
 
                 # update scrollbars after loading new file
-                #GLib.idle_add(lambda: (self.hscroll.update_visibility(),
-                 #      self.vscroll.update_visibility(),
-                  #     False))
+                #Lib.idle_add(lambda: (self.hscroll.update_visibility(),
+                #       self.vscroll.update_visibility(),
+                #       False))
 
 
                 self.view.queue_draw()
