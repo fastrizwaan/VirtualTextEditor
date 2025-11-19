@@ -1154,31 +1154,31 @@ class Renderer:
         self.selection_foreground_color = (1.0, 1.0, 1.0)
 
     def calculate_max_line_width(self, cr, buf):
-        """Calculate the maximum line width across all lines in the buffer"""
         if not buf:
             self.max_line_width = 0
             return
-        
+
         layout = PangoCairo.create_layout(cr)
         layout.set_font_description(self.font)
         layout.set_auto_dir(True)
-        
-        max_width = 0
+
         total = buf.total()
-        ln_width = self.calculate_line_number_width(cr, total)
-        
-        # Check all lines
+        ln_w = self.calculate_line_number_width(cr, total)
+
+        max_text_w = 0
         for ln in range(total):
             text = buf.get_line(ln)
             if text:
                 layout.set_text(text, -1)
                 ink, logical = layout.get_pixel_extents()
-                text_w = logical.width
-                line_total_width = ln_width + text_w
-                if line_total_width > max_width:
-                    max_width = line_total_width
-        
-        self.max_line_width = max_width
+                w = logical.width
+                if w > max_text_w:
+                    max_text_w = w
+
+        # FINAL FIX: doc width = gutter + text width
+        self.max_line_width = ln_w + max_text_w
+
+
     
     def get_text_width(self, cr, text):
         """Calculate actual pixel width of text using Pango"""
@@ -1196,6 +1196,26 @@ class Renderer:
         max_line_num = str(total_lines)
         width = self.get_text_width(cr, max_line_num)
         return width + 15  # Add padding (5px left + 10px right margin)
+
+    def compute_base_x(self, is_rtl, text_w, ln_w, scroll_x, view_w, doc_w):
+        # --- FIX: subtract overlay scrollbar width for real viewport ---
+        overlay_width = 12
+        viewport_w = max(0, view_w - overlay_width)
+
+        available = max(0, viewport_w - ln_w)
+
+        # LTR — simple case
+        if not is_rtl:
+            return ln_w - scroll_x
+
+        # RTL — when full text fits
+        if doc_w <= available:
+            return ln_w + (available - text_w)
+
+        # RTL — long document
+        return ln_w + (doc_w - scroll_x - text_w)
+
+
 
     def draw(self, cr, alloc, buf, scroll_line, scroll_x,
             cursor_visible=True, cursor_phase=0.0):
@@ -1222,9 +1242,9 @@ class Renderer:
                     layout.set_text(text, -1)
                     ink, logical = layout.get_pixel_extents()
                     text_w = logical.width
-                    line_total_width = ln_width + text_w
-                    if line_total_width > max_width:
-                        max_width = line_total_width
+                    if text_w > max_width:
+                        max_width = text_w
+
             
             self.max_line_width = max_width
 
@@ -1297,19 +1317,27 @@ class Renderer:
             text_w = logical.width
             
             # Track maximum width for horizontal scrollbar
-            line_total_width = ln_width + text_w
-            if line_total_width > max_width_seen:
-                max_width_seen = line_total_width
+            if text_w > max_width_seen:
+                max_width_seen = text_w
+
 
             # Calculate base position
-            if is_rtl:
-                available = max(0, alloc.width - ln_width)
-                if scroll_x == 0:
-                    base_x = ln_width + max(0, available - text_w)
-                else:
-                    base_x = ln_width + available - scroll_x
-            else:
-                base_x = ln_width - scroll_x
+            overlay_width = 12  # same constant as scrollbar CSS
+            viewport_w = max(0, alloc.width - overlay_width)
+
+            base_x = self.compute_base_x(
+                is_rtl,
+                text_w,
+                ln_width,
+                scroll_x,
+                viewport_w,
+                self.max_line_width
+            )
+
+
+
+
+
             
             # Set clipping region to prevent text from overlapping line numbers
             cr.save()
@@ -1505,13 +1533,20 @@ class Renderer:
             text_w, _ = cur_l.get_pixel_size()
 
             if is_rtl:
-                available = max(0, alloc.width - ln_width)
-                if scroll_x == 0:
-                    base_x = ln_width + max(0, available - text_w)
+                viewport_w = alloc.width - ln_width
+                doc_w = self.max_line_width
+
+                if doc_w <= viewport_w:
+                    # Case A: document fits in viewport → align to viewport right
+                    base_x = ln_width + (viewport_w - text_w) - scroll_x
                 else:
-                    base_x = ln_width + available - scroll_x
+                    # Case B: document extends beyond viewport → align to doc right
+                    base_x = (ln_width + doc_w) - scroll_x - text_w
             else:
+                # LTR baseline
                 base_x = ln_width - scroll_x
+
+
 
             byte_index = visual_byte_index(line_text, cc)
             strong_pos, weak_pos = cur_l.get_cursor_pos(byte_index)
@@ -1628,44 +1663,110 @@ class VirtualTextView(Gtk.DrawingArea):
         if new != self.scroll_x:
             self.scroll_x = new
             self.queue_draw()
-                
+
     def on_resize(self, widget, width, height):
-        """Handle window resize to update scrollbar visibility"""
-        self.update_scrollbar()
+        if width <= 0 or height <= 0:
+            return False
+
+        # --- IMPORTANT FIX: recompute max line width BEFORE scroll logic ---
+        self.renderer.needs_full_width_scan = True
+        surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
+        cr = cairo.Context(surface)
+        self.renderer.calculate_max_line_width(cr, self.buf)
+
+        total = self.buf.total()
+        line_h = self.renderer.line_h
+        visible = max(1, height // line_h)
+
+        # ----- VERTICAL -----
+        self.vadj.set_lower(0)
+        self.vadj.set_upper(total)
+        self.vadj.set_page_size(visible)
+        self.vadj.set_step_increment(1)
+        self.vadj.set_page_increment(visible)
+
+        max_scroll = max(0, total - visible)
+        if self.scroll_line > max_scroll:
+            self.scroll_line = max_scroll
+            self.vadj.set_value(max_scroll)
+
+        # ----- HORIZONTAL -----
+        overlay_width = 12
+        viewport_width = max(0, width - overlay_width)
+
+        doc_w = self.renderer.max_line_width
+
+        self.hadj.set_lower(0)
+        self.hadj.set_upper(doc_w)
+        self.hadj.set_page_size(viewport_width)
+        self.hadj.set_step_increment(20)
+        self.hadj.set_page_increment(viewport_width // 2)
+
+        max_hscroll = max(0, doc_w - viewport_width)
+        if self.scroll_x > max_hscroll:
+            self.scroll_x = max_hscroll
+            self.hadj.set_value(max_hscroll)
+
         return False
+
+
+
 
     def file_loaded(self):
         """Called after a new file is loaded to trigger width calculation"""
         self.renderer.needs_full_width_scan = True
         self.queue_draw()
         self.update_scrollbar()
-        
-    def update_scrollbar(self):
+
+    def _finalize_scrollbar_visibility(self):
         width = self.get_width()
         height = self.get_height()
         if width <= 0 or height <= 0:
-            return
+            return False
 
-        # TRUE viewport width in GTK4 (overlay scrollbars do NOT consume space)
-        viewport_width = width
-
-        # vertical
-        total_lines = self.buf.total()
+        total = self.buf.total()
         line_h = self.renderer.line_h
         visible = max(1, height // line_h)
 
+        # Vertical
+        self.vscroll.set_visible(total > visible)
+
+        # Horizontal
+        doc_w = self.renderer.max_line_width
+        self.hscroll.set_visible(doc_w > width)
+
+        return False
+
+
+    def update_scrollbar(self):
+        # --- FIX: effective viewport width (overlay scrollbar occupies space) ---
+        overlay_width = 12
+        viewport_width = max(0, self.get_width() - overlay_width)
+
+        # ----- VERTICAL -----
+        total_lines = self.buf.total()
+        line_h = self.renderer.line_h
+        height = self.get_height()
+
+        if height <= 0:
+            return
+
+        visible = max(1, height // line_h)
+
+        # Adjustment uses total lines as upper
         self.vadj.set_lower(0)
         self.vadj.set_upper(total_lines)
         self.vadj.set_page_size(visible)
         self.vadj.set_step_increment(1)
         self.vadj.set_page_increment(visible)
 
+        # Clamp scroll
         max_scroll = max(0, total_lines - visible)
         if self.scroll_line > max_scroll:
             self.scroll_line = max_scroll
             self.vadj.set_value(self.scroll_line)
 
-        # horizontal
+        # ----- HORIZONTAL -----
         doc_w = self.renderer.max_line_width
 
         self.hadj.set_lower(0)
@@ -1679,13 +1780,13 @@ class VirtualTextView(Gtk.DrawingArea):
             self.scroll_x = max_hscroll
             self.hadj.set_value(self.scroll_x)
 
+        # Use corrected viewport for scrollbar visibility
         def finalize():
             self.vscroll.set_visible(total_lines > visible)
             self.hscroll.set_visible(doc_w > viewport_width)
             return False
 
         GLib.idle_add(finalize)
-
 
 
     # Correct UTF-8 byte-index for logical col → Pango visual mapping
@@ -1860,14 +1961,18 @@ class VirtualTextView(Gtk.DrawingArea):
             ln_w = self.renderer.calculate_line_number_width(cr, self.buf.total())
 
             # base_x matches draw()
-            if is_rtl:
-                available = max(0, width - ln_w)
-                if self.scroll_x == 0:
-                    base_x = ln_w + max(0, available - text_w)
-                else:
-                    base_x = ln_w + available - self.scroll_x
-            else:
-                base_x = ln_w - self.scroll_x
+            overlay_width = 12
+            viewport_w = max(0, width - overlay_width)
+
+            base_x = self.renderer.compute_base_x(
+                is_rtl,
+                text_w,
+                ln_w,
+                self.scroll_x,
+                viewport_w,
+                self.renderer.max_line_width,
+            )
+
 
             # ---- FIXED: correct UTF-8 byte index ----
             byte_index = self.visual_byte_index(line_text, cc)
@@ -2359,14 +2464,19 @@ class VirtualTextView(Gtk.DrawingArea):
         text_w, _ = layout.get_pixel_size()
         
         # Calculate base_x matching the renderer
-        if is_rtl:
-            available = max(0, self.get_width() - ln_width)
-            if self.scroll_x == 0:
-                base_x = ln_width + max(0, available - text_w)
-            else:
-                base_x = ln_width + available - self.scroll_x
-        else:
-            base_x = ln_width - self.scroll_x
+        overlay_width = 12
+        viewport_w = max(0, alloc.width - overlay_width)
+
+        base_x = self.renderer.compute_base_x(
+            is_rtl,
+            text_w,
+            ln_width,
+            scroll_x,
+            viewport_w,
+            self.renderer.max_line_width
+        )
+
+
         
         # Calculate relative pixel position from base
         col_pixels = x - base_x
@@ -2431,14 +2541,19 @@ class VirtualTextView(Gtk.DrawingArea):
         text_w, _ = layout.get_pixel_size()
         view_w = self.get_width()
 
-        if rtl:
-            avail = max(0, view_w - ln_width)
-            if self.scroll_x == 0:
-                base_x = ln_width + max(0, avail - text_w)
-            else:
-                base_x = ln_width + avail - self.scroll_x
-        else:
-            base_x = ln_width - self.scroll_x
+        overlay_width = 12
+        viewport_w = max(0, alloc.width - overlay_width)
+
+        base_x = self.renderer.compute_base_x(
+            is_rtl,
+            text_w,
+            ln_width,
+            scroll_x,
+            viewport_w,
+            self.renderer.max_line_width
+        )
+
+
 
         col_px = max(0, x - base_x)
         col = self.pixel_to_column(cr, text, col_px)
@@ -2466,93 +2581,89 @@ class VirtualTextView(Gtk.DrawingArea):
         self.ctrl.end_drag()
         self.queue_draw()
 
-
     def keep_cursor_visible(self):
-        """Smooth, non-jumping cursor tracking for horizontal and vertical scroll."""
+        import unicodedata
+
+        max_vis = max(1, self.get_height() // self.renderer.line_h)
         cl = self.buf.cursor_line
-        cc = self.buf.cursor_col
 
-        alloc_w = self.get_width()
-        alloc_h = self.get_height()
-        if alloc_w <= 0 or alloc_h <= 0:
-            return
-
-        # ----- compute line height window -----
-        line_h = self.renderer.line_h
-        visible_lines = alloc_h // line_h
-
-        # Vertical auto-scroll
         if cl < self.scroll_line:
             self.scroll_line = cl
-            self.vadj.set_value(self.scroll_line)
-        elif cl >= self.scroll_line + visible_lines:
-            self.scroll_line = cl - visible_lines + 1
-            if self.scroll_line < 0:
-                self.scroll_line = 0
-            self.vadj.set_value(self.scroll_line)
+        elif cl >= self.scroll_line + max_vis:
+            self.scroll_line = cl - max_vis + 1
 
-        # ----- compute cursor X inside renderer -----
-        line_text = self.buf.get_line(cl)
+        self.scroll_line = max(0, self.scroll_line)
 
-        # Build Pango layout to get exact pixel position
+        # ---- horizontal ----
         surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
         cr = cairo.Context(surface)
+
+        text = self.buf.get_line(cl)
+
         layout = PangoCairo.create_layout(cr)
         layout.set_font_description(self.renderer.font)
         layout.set_auto_dir(True)
-        layout.set_text(line_text if line_text else " ", -1)
+        layout.set_text(text if text else " ", -1)
 
-        # RTL detection (mirrors renderer.draw)
-        import unicodedata
-        def is_rtl(text):
-            for ch in text:
-                t = unicodedata.bidirectional(ch)
-                if t in ("R", "AL", "RLE", "RLO"):
-                    return True
-                if t in ("L", "LRE", "LRO"):
+        def is_rtl(t):
+            for ch in t:
+                b = unicodedata.bidirectional(ch)
+                if b in ("L", "LRE", "LRO"):
                     return False
+                if b in ("R", "AL", "RLE", "RLO"):
+                    return True
             return False
 
-        rtl = is_rtl(line_text)
-        byte_index = self.visual_byte_index(line_text, cc)
-        strong_pos, weak_pos = layout.get_cursor_pos(byte_index)
-        cursor_px = strong_pos.x // Pango.SCALE
+        rtl = is_rtl(text)
 
-        # Calculate line number gutter width
-        ln_w = self.renderer.calculate_line_number_width(cr, self.buf.total())
-
-        # Calculate base X exactly as renderer.draw does
         text_w, _ = layout.get_pixel_size()
-        if rtl:
-            available = max(0, alloc_w - ln_w)
-            if self.scroll_x == 0:
-                base_x = ln_w + max(0, available - text_w)
-            else:
-                base_x = ln_w + available - self.scroll_x
-        else:
-            base_x = ln_w - self.scroll_x
+        ln_w = self.renderer.calculate_line_number_width(cr, self.buf.total())
+        view_w = self.get_width()
+        available = max(0, view_w - ln_w)
 
-        cursor_screen_x = base_x + cursor_px
+        doc_w = self.renderer.max_line_width
 
-        # ----- Horizontal auto-scroll (NON-JUMPING FIX) -----
-        # Add a 2px comfort margin
-        left_margin = ln_w + 2
-        right_margin = alloc_w - 2
+        # cursor offset
+        byte_index = self.visual_byte_index(text, self.buf.cursor_col)
+        strong_pos, weak_pos = layout.get_cursor_pos(byte_index)
+        cursor_offset = strong_pos.x // Pango.SCALE
 
-        if cursor_screen_x < left_margin:
-            # Smooth left scroll
-            self.scroll_x -= (left_margin - cursor_screen_x)
-            if self.scroll_x < 0:
-                self.scroll_x = 0
-            self.hadj.set_value(self.scroll_x)
+        # ---------- RTL alignment (correct) ----------
+        base_x = self.renderer.compute_base_x(
+            rtl,
+            text_w,
+            ln_w,
+            self.scroll_x,
+            view_w,
+            doc_w
+        )
 
-        elif cursor_screen_x > right_margin:
-            # Smooth right scroll
-            self.scroll_x += (cursor_screen_x - right_margin)
-            max_hscroll = max(0, self.renderer.max_line_width - alloc_w)
-            if self.scroll_x > max_hscroll:
-                self.scroll_x = max_hscroll
-            self.hadj.set_value(self.scroll_x)
+        cursor_x = base_x + cursor_offset
+
+        left_margin  = ln_w + 20
+        right_margin = view_w - 30
+
+        if cursor_x < left_margin:
+            delta = left_margin - cursor_x
+            self.scroll_x = max(0, self.scroll_x - delta)
+
+        elif cursor_x > right_margin:
+            delta = cursor_x - right_margin
+            self.scroll_x += delta
+
+
+        # ---------- LTR standard ----------
+        base_x = ln_w - self.scroll_x
+        cursor_x = base_x + cursor_offset
+
+        left_margin  = ln_w + 20
+        right_margin = view_w - 30
+
+        if cursor_x < left_margin:
+            self.scroll_x = max(0, cursor_offset - 20)
+
+        elif cursor_x > right_margin:
+            self.scroll_x = cursor_offset - (available - 50)
 
 
 
@@ -2569,20 +2680,18 @@ class VirtualTextView(Gtk.DrawingArea):
         max_vis = max(1, self.get_height() // self.renderer.line_h)
         max_scroll = max(0, total - max_vis)
 
-
+        # vertical wheel → adjust vadj
         if dy:
-            self.scroll_line = max(
-                0,
-                min(self.scroll_line + int(dy * 4), max_scroll)
-            )
+            new = self.vadj.get_value() + dy * 3   # smooth wheel step
+            new = max(0, min(max_scroll, new))
+            self.vadj.set_value(new)
 
+        # horizontal wheel → adjust hadj
         if dx:
-            self.scroll_x = max(0, self.scroll_x + int(dx * 40))
+            new = self.hadj.get_value() + dx * 40
+            new = max(0, min(self.hadj.get_upper(), new))
+            self.hadj.set_value(new)
 
-        self.update_scrollbar()
-
-
-        self.queue_draw()
         return True
 
 
@@ -2607,10 +2716,6 @@ class VirtualTextView(Gtk.DrawingArea):
         )
         # Update scrollbars after drawing (this updates visibility based on content)
         GLib.idle_add(lambda: (self.update_scrollbar(), False))
-
-
-
-
 
 
 
@@ -2765,6 +2870,7 @@ class EditorWindow(Adw.ApplicationWindow):
         self.vscroll.set_visible(total > visible)
         self.hscroll.set_visible(doc_w > width)
 
+
     def open_file(self, *_):
         dialog = Gtk.FileDialog()
 
@@ -2794,9 +2900,9 @@ class EditorWindow(Adw.ApplicationWindow):
                 self.view.file_loaded()
 
                 # update scrollbars after loading new file
-                GLib.idle_add(lambda: (self.hscroll.update_visibility(),
-                       self.vscroll.update_visibility(),
-                       False))
+                # update scrollbars after loading new file
+                GLib.idle_add(lambda: (self.view.update_scrollbar(), False))
+
 
 
                 self.view.queue_draw()
