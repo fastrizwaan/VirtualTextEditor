@@ -997,19 +997,17 @@ class InputController:
         self.dragging = False
 
     def start_drag(self, ln, col):
-        """Start a drag selection"""
         self.dragging = True
         self.drag_start_line = ln
         self.drag_start_col = col
         self.buf.selection.set_start(ln, col)
         self.buf.selection.set_end(ln, col)
-        self.buf.set_cursor(ln, col)
+        self.buf.set_cursor(ln, col, extend_selection=True)
 
     def update_drag(self, ln, col):
-        """Update drag selection"""
         if self.dragging:
             self.buf.selection.set_end(ln, col)
-            self.buf.set_cursor(ln, col)
+            self.buf.set_cursor(ln, col, extend_selection=True)
 
     def end_drag(self):
         """End drag selection"""
@@ -2018,16 +2016,39 @@ class VirtualTextView(Gtk.DrawingArea):
 
 
     def install_mouse(self):
-        g = Gtk.GestureClick()
-        g.connect("pressed", self.on_click)
-        g.connect("released", self.on_release)
-        self.add_controller(g)
+        click = Gtk.GestureClick()
+        click.set_button(1)
+        click.connect("pressed", self.on_click_pressed)
+        self.add_controller(click)
 
-        d = Gtk.GestureDrag()
-        d.connect("drag-begin", self.on_drag_begin)
-        d.connect("drag-update", self.on_drag_update)
-        d.connect("drag-end", self.on_drag_end)
-        self.add_controller(d)
+        drag = Gtk.GestureDrag()
+        drag.set_button(1)
+        drag.connect("drag-begin", self.on_drag_begin)
+        drag.connect("drag-update", self.on_drag_update)
+        drag.connect("drag-end", self.on_drag_end)
+        self.add_controller(drag)
+
+    def on_click_pressed(self, g, n_press, x, y):
+        self.grab_focus()
+
+        ln, col = self.xy_to_line_col(x, y)
+        mods = g.get_current_event_state()
+        shift = bool(mods & Gdk.ModifierType.SHIFT_MASK)
+
+        if shift:
+            # Extend selection
+            if not self.buf.selection.active:
+                self.buf.selection.set_start(self.buf.cursor_line, self.buf.cursor_col)
+            self.buf.selection.set_end(ln, col)
+            self.buf.set_cursor(ln, col, extend_selection=True)
+        else:
+            # Always start a new selection on mouse press
+            self.buf.selection.clear()
+            self.ctrl.start_drag(ln, col)
+
+        self.queue_draw()
+
+
 
     def on_click(self, g, n, x, y):
         self.grab_focus()
@@ -2105,110 +2126,78 @@ class VirtualTextView(Gtk.DrawingArea):
         self.ctrl.end_drag()
 
     def on_drag_begin(self, g, x, y):
-        """Start drag selection"""
-        # Calculate position
+        ln, col = self.xy_to_line_col(x, y)
+        # Nothing else needed — selection already started on press
+        self.ctrl.start_drag(ln, col)
+        self.queue_draw()
+
+
+    def xy_to_line_col(self, x, y):
         surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
         cr = cairo.Context(surface)
-        ln_width = self.renderer.calculate_line_number_width(cr, self.buf.total())
 
+        ln_width = self.renderer.calculate_line_number_width(cr, self.buf.total())
         ln = self.scroll_line + int(y // self.renderer.line_h)
         ln = max(0, min(ln, self.buf.total() - 1))
 
-        # Calculate column (similar to on_click)
-        import unicodedata
         text = self.buf.get_line(ln)
-        
+
+        # Create layout for RTL/LTR measurement
         layout = PangoCairo.create_layout(cr)
         layout.set_font_description(self.renderer.font)
         layout.set_auto_dir(True)
         layout.set_text(text if text else " ", -1)
-        
-        def line_is_rtl(text):
-            for ch in text:
-                t = unicodedata.bidirectional(ch)
-                if t in ("L", "LRE", "LRO"):
-                    return False
-                if t in ("R", "AL", "RLE", "RLO"):
+
+        # Detect RTL exactly as draw()
+        import unicodedata
+        def is_rtl(t):
+            for ch in t:
+                b = unicodedata.bidirectional(ch)
+                if b in ("R", "AL", "RLE", "RLO"):
                     return True
+                if b in ("L", "LRE", "LRO"):
+                    return False
             return False
-        
-        is_rtl = line_is_rtl(text)
+
+        rtl = is_rtl(text)
         text_w, _ = layout.get_pixel_size()
-        
-        if is_rtl:
-            available = max(0, self.get_width() - ln_width)
+        view_w = self.get_width()
+
+        if rtl:
+            avail = max(0, view_w - ln_width)
             if self.scroll_x == 0:
-                base_x = ln_width + max(0, available - text_w)
+                base_x = ln_width + max(0, avail - text_w)
             else:
-                base_x = ln_width + available - self.scroll_x
+                base_x = ln_width + avail - self.scroll_x
         else:
             base_x = ln_width - self.scroll_x
-        
-        col_pixels = x - base_x
-        col_pixels = max(0, col_pixels)
-        col = self.pixel_to_column(cr, text, col_pixels)
+
+        col_px = max(0, x - base_x)
+        col = self.pixel_to_column(cr, text, col_px)
         col = max(0, min(col, len(text)))
 
-        self.ctrl.start_drag(ln, col)
-        self.queue_draw()
+        return ln, col
 
     def on_drag_update(self, g, dx, dy):
-        """Update drag selection"""
         ok, sx, sy = g.get_start_point()
         if not ok:
             return
 
-        # Calculate current position
-        surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
-        cr = cairo.Context(surface)
-        ln_width = self.renderer.calculate_line_number_width(cr, self.buf.total())
-
-        current_y = sy + dy
-        ln = self.scroll_line + int(current_y // self.renderer.line_h)
-        ln = max(0, min(ln, self.buf.total() - 1))
-
-        # Calculate column
-        import unicodedata
-        text = self.buf.get_line(ln)
-        
-        layout = PangoCairo.create_layout(cr)
-        layout.set_font_description(self.renderer.font)
-        layout.set_auto_dir(True)
-        layout.set_text(text if text else " ", -1)
-        
-        def line_is_rtl(text):
-            for ch in text:
-                t = unicodedata.bidirectional(ch)
-                if t in ("L", "LRE", "LRO"):
-                    return False
-                if t in ("R", "AL", "RLE", "RLO"):
-                    return True
-            return False
-        
-        is_rtl = line_is_rtl(text)
-        text_w, _ = layout.get_pixel_size()
-        
-        if is_rtl:
-            available = max(0, self.get_width() - ln_width)
-            if self.scroll_x == 0:
-                base_x = ln_width + max(0, available - text_w)
-            else:
-                base_x = ln_width + available - self.scroll_x
-        else:
-            base_x = ln_width - self.scroll_x
-        
-        current_x = sx + dx
-        col_pixels = current_x - base_x
-        col_pixels = max(0, col_pixels)
-        col = self.pixel_to_column(cr, text, col_pixels)
-        col = max(0, min(col, len(text)))
-
+        ln, col = self.xy_to_line_col(sx + dx, sy + dy)
         self.ctrl.update_drag(ln, col)
         self.queue_draw()
 
+
+    def on_click_released(self, g, n, x, y):
+        if self._pending_click:
+            self.ctrl.click(self._click_ln, self._click_col)
+        self._pending_click = False
+        self.queue_draw()
+
     def on_drag_end(self, g, dx, dy):
-        """End drag selection"""
         self.ctrl.end_drag()
+        self.queue_draw()
+
 
     def keep_cursor_visible(self):
         import unicodedata
