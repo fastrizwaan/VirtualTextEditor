@@ -2027,6 +2027,38 @@ class VirtualTextView(Gtk.DrawingArea):
         drag.connect("drag-update", self.on_drag_update)
         drag.connect("drag-end", self.on_drag_end)
         self.add_controller(drag)
+        
+        # Track last click time and position for multi-click detection
+        self.last_click_time = 0
+        self.last_click_line = -1
+        self.last_click_col = -1
+        self.click_count = 0
+
+    def find_word_boundaries(self, line, col):
+        """Find word boundaries at the given position. Words include alphanumeric and underscore."""
+        import re
+        
+        if not line:
+            return 0, 0
+        
+        # Word character pattern: alphanumeric + underscore
+        word_char = re.compile(r'[\w]', re.UNICODE)
+        
+        # If clicking on whitespace or punctuation, select just that character
+        if col >= len(line) or not word_char.match(line[col]):
+            return col, min(col + 1, len(line))
+        
+        # Find start of word
+        start = col
+        while start > 0 and word_char.match(line[start - 1]):
+            start -= 1
+        
+        # Find end of word
+        end = col
+        while end < len(line) and word_char.match(line[end]):
+            end += 1
+        
+        return start, end
 
     def on_click_pressed(self, g, n_press, x, y):
         self.grab_focus()
@@ -2034,6 +2066,20 @@ class VirtualTextView(Gtk.DrawingArea):
         ln, col = self.xy_to_line_col(x, y)
         mods = g.get_current_event_state()
         shift = bool(mods & Gdk.ModifierType.SHIFT_MASK)
+        
+        # Track click timing for double/triple click detection
+        import time
+        current_time = time.time()
+        time_diff = current_time - self.last_click_time
+        
+        # Reset click count if too much time passed or clicked different location
+        if time_diff > 0.5 or ln != self.last_click_line or abs(col - self.last_click_col) > 3:
+            self.click_count = 0
+        
+        self.click_count += 1
+        self.last_click_time = current_time
+        self.last_click_line = ln
+        self.last_click_col = col
 
         if shift:
             # Extend selection
@@ -2041,13 +2087,27 @@ class VirtualTextView(Gtk.DrawingArea):
                 self.buf.selection.set_start(self.buf.cursor_line, self.buf.cursor_col)
             self.buf.selection.set_end(ln, col)
             self.buf.set_cursor(ln, col, extend_selection=True)
+        elif self.click_count == 3:
+            # Triple click - select entire line
+            line_text = self.buf.get_line(ln)
+            self.buf.selection.set_start(ln, 0)
+            self.buf.selection.set_end(ln, len(line_text))
+            self.buf.cursor_line = ln
+            self.buf.cursor_col = len(line_text)
+        elif self.click_count == 2:
+            # Double click - select word
+            line_text = self.buf.get_line(ln)
+            start_col, end_col = self.find_word_boundaries(line_text, col)
+            self.buf.selection.set_start(ln, start_col)
+            self.buf.selection.set_end(ln, end_col)
+            self.buf.cursor_line = ln
+            self.buf.cursor_col = end_col
         else:
-            # Always start a new selection on mouse press
+            # Single click - start new selection on mouse press
             self.buf.selection.clear()
             self.ctrl.start_drag(ln, col)
 
         self.queue_draw()
-
 
 
     def on_click(self, g, n, x, y):
