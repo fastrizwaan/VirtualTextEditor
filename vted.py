@@ -2035,26 +2035,33 @@ class VirtualTextView(Gtk.DrawingArea):
 
     def find_word_boundaries(self, line, col):
         """Find word boundaries at the given position. Words include alphanumeric and underscore."""
-        import re
+        import unicodedata
         
         if not line:
             return 0, 0
         
-        # Word character pattern: alphanumeric + underscore
-        word_char = re.compile(r'[\w]', re.UNICODE)
+        # Check if character is a word character (letter, number, underscore, or combining mark)
+        def is_word_char(ch):
+            if ch == '_':
+                return True
+            cat = unicodedata.category(ch)
+            # Letter categories: Lu, Ll, Lt, Lm, Lo
+            # Number categories: Nd, Nl, No
+            # Mark categories: Mn, Mc, Me (for combining characters like Devanagari vowel signs)
+            return cat[0] in ('L', 'N', 'M')
         
-        # If clicking on whitespace or punctuation, select just that character
-        if col >= len(line) or not word_char.match(line[col]):
+        # If clicking beyond line or on whitespace/punctuation, select just that position
+        if col >= len(line) or not is_word_char(line[col]):
             return col, min(col + 1, len(line))
         
         # Find start of word
         start = col
-        while start > 0 and word_char.match(line[start - 1]):
+        while start > 0 and is_word_char(line[start - 1]):
             start -= 1
         
         # Find end of word
         end = col
-        while end < len(line) and word_char.match(line[end]):
+        while end < len(line) and is_word_char(line[end]):
             end += 1
         
         return start, end
