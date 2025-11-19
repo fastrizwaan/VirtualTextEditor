@@ -8,7 +8,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 gi.require_version("Gdk", "4.0")
 
-from gi.repository import Gtk, Adw, Gdk, GObject, Pango, PangoCairo, GLib
+from gi.repository import Gtk, Adw, Gdk, GObject, Pango, PangoCairo, GLib, Gio
 
 CSS_OVERLAY_SCROLLBAR = """
 /* Vertical scrollbar */
@@ -2035,11 +2035,110 @@ class VirtualTextView(Gtk.DrawingArea):
         drag.connect("drag-end", self.on_drag_end)
         self.add_controller(drag)
         
+        # Right-click menu
+        right_click = Gtk.GestureClick()
+        right_click.set_button(3)  # Right mouse button
+        right_click.connect("pressed", self.on_right_click)
+        self.add_controller(right_click)
+        
         # Track last click time and position for multi-click detection
         self.last_click_time = 0
         self.last_click_line = -1
         self.last_click_col = -1
         self.click_count = 0
+
+    def on_right_click(self, gesture, n_press, x, y):
+        """Show context menu on right-click"""
+        self.grab_focus()
+        
+        # Create popover menu
+        menu = Gtk.PopoverMenu()
+        menu.set_parent(self)
+        menu.set_has_arrow(False)
+        
+        # Create menu model
+        menu_model = Gio.Menu()
+        
+        has_selection = self.buf.selection.has_selection()
+        
+        if has_selection:
+            # Menu items for when there's a selection
+            menu_model.append("Cut", "view.cut")
+            menu_model.append("Copy", "view.copy")
+            menu_model.append("Paste", "view.paste")
+            menu_model.append("Delete", "view.delete")
+        else:
+            # Menu items for when there's no selection
+            menu_model.append("Paste", "view.paste")
+        
+        # Always show these
+        menu_model.append("Select All", "view.select-all")
+        # Undo/Redo commented out until implemented
+        menu_model.append("Undo", "view.undo")
+        menu_model.append("Redo", "view.redo")
+        
+        menu.set_menu_model(menu_model)
+        
+        # Create action group if not exists
+        if not hasattr(self, 'action_group'):
+            self.action_group = Gio.SimpleActionGroup()
+            self.insert_action_group("view", self.action_group)
+            
+            # Create actions
+            cut_action = Gio.SimpleAction.new("cut", None)
+            cut_action.connect("activate", lambda a, p: self.cut_to_clipboard())
+            self.action_group.add_action(cut_action)
+            
+            copy_action = Gio.SimpleAction.new("copy", None)
+            copy_action.connect("activate", lambda a, p: self.copy_to_clipboard())
+            self.action_group.add_action(copy_action)
+            
+            paste_action = Gio.SimpleAction.new("paste", None)
+            paste_action.connect("activate", lambda a, p: self.paste_from_clipboard())
+            self.action_group.add_action(paste_action)
+            
+            delete_action = Gio.SimpleAction.new("delete", None)
+            delete_action.connect("activate", lambda a, p: self.on_delete_action())
+            self.action_group.add_action(delete_action)
+            
+            select_all_action = Gio.SimpleAction.new("select-all", None)
+            select_all_action.connect("activate", lambda a, p: self.buf.select_all())
+            self.action_group.add_action(select_all_action)
+            
+            # Placeholder actions for undo/redo (commented out)
+            undo_action = Gio.SimpleAction.new("undo", None)
+            undo_action.connect("activate", lambda a, p: self.on_undo_action())
+            self.action_group.add_action(undo_action)
+            
+            redo_action = Gio.SimpleAction.new("redo", None)
+            redo_action.connect("activate", lambda a, p: self.on_redo_action())
+            self.action_group.add_action(redo_action)
+        
+        # Position the menu at the click location with slight offset
+        rect = Gdk.Rectangle()
+        rect.x = int(x) + 60
+        rect.y = int(y) - 1
+        rect.width = 1
+        rect.height = 1
+        menu.set_pointing_to(rect)
+        
+        menu.popup()
+
+    def on_delete_action(self):
+        """Delete selected text"""
+        if self.buf.selection.has_selection():
+            self.buf.delete_selection()
+            self.keep_cursor_visible()
+            self.update_im_cursor_location()
+            self.queue_draw()
+
+    def on_undo_action(self):
+        """Placeholder for undo - to be implemented"""
+        print("Undo - to be implemented")
+
+    def on_redo_action(self):
+        """Placeholder for redo - to be implemented"""
+        print("Redo - to be implemented")
 
     def find_word_boundaries(self, line, col):
         """Find word boundaries at the given position. Words include alphanumeric and underscore."""
