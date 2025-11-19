@@ -1547,13 +1547,12 @@ class Renderer:
             cr.line_to(cx_strong + 0.4, cy + self.text_h)
             cr.stroke()
 
-            # Weak caret (ghost-carets)
-            if weak_pos.x != strong_pos.x:
+            # Weak caret (ghost-carets) - only show if different from strong AND text is actually bidirectional
+            if weak_pos.x != strong_pos.x and is_rtl:
                 cr.set_source_rgba(1, 1, 1, opacity * 0.45)
                 cr.move_to(cx_weak + 0.4, cy)
                 cr.line_to(cx_weak + 0.4, cy + self.text_h)
-                cr.stroke()   
-
+                cr.stroke()
 
 
 # ============================================================
