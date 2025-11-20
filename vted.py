@@ -2297,47 +2297,83 @@ class VirtualTextView(Gtk.DrawingArea):
         ln, col = self.xy_to_line_col(x, y)
         mods = g.get_current_event_state()
         shift = bool(mods & Gdk.ModifierType.SHIFT_MASK)
-        
-        # Track click timing for double/triple click detection
+
+        # --- Multi-click timing ---
         import time
         current_time = time.time()
         time_diff = current_time - self.last_click_time
-        
-        # Reset click count if too much time passed or clicked different location
+
         if time_diff > 0.5 or ln != self.last_click_line or abs(col - self.last_click_col) > 3:
             self.click_count = 0
-        
+
         self.click_count += 1
         self.last_click_time = current_time
         self.last_click_line = ln
         self.last_click_col = col
 
+        line_text = self.buf.get_line(ln)
+        line_len = len(line_text)
+
+        # ----------------------------------------------------------
+        # SHIFT EXTEND (unchanged)
+        # ----------------------------------------------------------
         if shift:
-            # Extend selection
             if not self.buf.selection.active:
                 self.buf.selection.set_start(self.buf.cursor_line, self.buf.cursor_col)
             self.buf.selection.set_end(ln, col)
             self.buf.set_cursor(ln, col, extend_selection=True)
-        elif self.click_count == 3:
-            # Triple click - select entire line
-            line_text = self.buf.get_line(ln)
+            self.queue_draw()
+            return
+
+        # ----------------------------------------------------------
+        # TRIPLE CLICK → select entire textual line (unchanged)
+        # ----------------------------------------------------------
+        if self.click_count == 3:
             self.buf.selection.set_start(ln, 0)
-            self.buf.selection.set_end(ln, len(line_text))
+            self.buf.selection.set_end(ln, line_len)
             self.buf.cursor_line = ln
-            self.buf.cursor_col = len(line_text)
-        elif self.click_count == 2:
-            # Double click - select word
-            line_text = self.buf.get_line(ln)
+            self.buf.cursor_col = line_len
+            self.queue_draw()
+            return
+
+        # ----------------------------------------------------------
+        # DOUBLE CLICK behavior
+        # ----------------------------------------------------------
+        if self.click_count == 2:
+
+            # Case 1: empty line → select full visual line including "\n" area
+            if line_len == 0:
+                self.buf.selection.set_start(ln, 0)
+                self.buf.selection.set_end(ln, 1)    # renderer extends to viewport
+                self.buf.cursor_line = ln
+                self.buf.cursor_col = 0
+                self.queue_draw()
+                return
+
+            # Case 2: double-click at end-of-line → select ONLY newline zone
+            if col >= line_len:
+                # Select purely the newline area: from line_len → line_len + 1
+                self.buf.selection.set_start(ln, line_len)
+                self.buf.selection.set_end(ln, line_len + 1)  # triggers viewport extension
+                self.buf.cursor_line = ln
+                self.buf.cursor_col = line_len
+                self.queue_draw()
+                return
+
+            # Case 3: normal double-click → word selection (unchanged)
             start_col, end_col = self.find_word_boundaries(line_text, col)
             self.buf.selection.set_start(ln, start_col)
             self.buf.selection.set_end(ln, end_col)
             self.buf.cursor_line = ln
             self.buf.cursor_col = end_col
-        else:
-            # Single click - start new selection on mouse press
-            self.buf.selection.clear()
-            self.ctrl.start_drag(ln, col)
+            self.queue_draw()
+            return
 
+        # ----------------------------------------------------------
+        # SINGLE CLICK (unchanged)
+        # ----------------------------------------------------------
+        self.buf.selection.clear()
+        self.ctrl.start_drag(ln, col)
         self.queue_draw()
 
 
@@ -2423,7 +2459,23 @@ class VirtualTextView(Gtk.DrawingArea):
 
         base_x = self.renderer.calculate_text_base_x(rtl, text_w, view_w, ln_width, self.scroll_x)
 
-        col_px = max(0, x - base_x)
+        # Calculate pixel position relative to text start
+        col_px = x - base_x
+        
+        # For RTL: check if clicking in the newline area (left of text)
+        # For LTR: check if clicking in the newline area (right of text)
+        if rtl:
+            # RTL text: newline area is to the LEFT of the text (negative col_px)
+            if col_px < 0:
+                # Clicked in newline area
+                return ln, len(text)
+        else:
+            # LTR text: newline area is to the RIGHT of the text
+            if col_px >= text_w:
+                # Clicked in newline area
+                return ln, len(text)
+        
+        col_px = max(0, col_px)
         col = self.pixel_to_column(cr, text, col_px)
         col = max(0, min(col, len(text)))
 
