@@ -2355,22 +2355,65 @@ class VirtualTextView(Gtk.DrawingArea):
         # ----------------------------------------------------------
         if self.click_count == 2:
 
-            # Case 1: empty line → select full visual line including "\n" area
+            # Case 1: empty line → context-aware selection
             if line_len == 0:
-                self.buf.selection.set_start(ln, 0)
-                self.buf.selection.set_end(ln, 1)    # renderer extends to viewport
-                self.buf.cursor_line = ln
-                self.buf.cursor_col = 0
+                # Check what comes next
+                next_line_text = None
+                if ln < self.buf.total() - 1:
+                    next_line_text = self.buf.get_line(ln + 1)
+                
+                if next_line_text is not None and len(next_line_text) == 0:
+                    # Next line is also empty: select only current empty line
+                    self.buf.selection.set_start(ln, 0)
+                    self.buf.selection.set_end(ln, 1)
+                    self.buf.cursor_line = ln
+                    self.buf.cursor_col = 0
+                elif next_line_text is not None and len(next_line_text) > 0:
+                    # Next line has text: select current empty line + next line's text
+                    self.buf.selection.set_start(ln, 0)
+                    self.buf.selection.set_end(ln + 1, len(next_line_text))
+                    self.buf.cursor_line = ln + 1
+                    self.buf.cursor_col = len(next_line_text)
+                else:
+                    # Last line (empty): don't select anything
+                    self.buf.selection.clear()
+                    self.buf.cursor_line = ln
+                    self.buf.cursor_col = 0
+                
                 self.queue_draw()
                 return
 
-            # Case 2: double-click at end-of-line → select ONLY newline zone
+            # Case 2: double-click beyond end of text
             if col > line_len:
-                # Select purely the newline area: from line_len → line_len + 1
-                self.buf.selection.set_start(ln, line_len)
-                self.buf.selection.set_end(ln, line_len + 1)  # triggers viewport extension
-                self.buf.cursor_line = ln
-                self.buf.cursor_col = line_len
+                # Check if this line has a newline (not the last line)
+                has_newline = ln < self.buf.total() - 1
+                
+                if has_newline:
+                    # Line has newline: select the newline area
+                    self.buf.selection.set_start(ln, line_len)
+                    self.buf.selection.set_end(ln, line_len + 1)
+                    self.buf.cursor_line = ln
+                    self.buf.cursor_col = line_len
+                else:
+                    # Last line (no newline): select trailing content
+                    # Find what's at the end: word or spaces
+                    if line_text and line_text[-1] == ' ':
+                        # Find start of trailing spaces
+                        start = line_len - 1
+                        while start > 0 and line_text[start - 1] == ' ':
+                            start -= 1
+                        self.buf.selection.set_start(ln, start)
+                        self.buf.selection.set_end(ln, line_len)
+                        self.buf.cursor_line = ln
+                        self.buf.cursor_col = line_len
+                    else:
+                        # Select the last word
+                        start_col, end_col = self.find_word_boundaries(line_text, line_len - 1)
+                        self.buf.selection.set_start(ln, start_col)
+                        self.buf.selection.set_end(ln, end_col)
+                        self.buf.cursor_line = ln
+                        self.buf.cursor_col = end_col
+                
                 self.queue_draw()
                 return
 
