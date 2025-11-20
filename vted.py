@@ -97,14 +97,32 @@ class IndexedFile:
 
     def detect_encoding(self, path):
         with open(path, "rb") as f:
-            b = f.read(4)
-        if b.startswith(b"\xff\xfe"):
+            data = f.read(4096)  # small peek is enough
+
+        # --- BOM detection ---
+        if data.startswith(b"\xff\xfe"):
             return "utf-16le"
-        if b.startswith(b"\xfe\xff"):
+        if data.startswith(b"\xfe\xff"):
             return "utf-16be"
-        if b.startswith(b"\xef\xbb\xbf"):
+        if data.startswith(b"\xef\xbb\xbf"):
             return "utf-8-sig"
+
+        # --- Heuristic UTF-16LE detection (no BOM) ---
+        if len(data) >= 4:
+            zeros_in_odd = sum(1 for i in range(1, len(data), 2) if data[i] == 0)
+            ratio = zeros_in_odd / (len(data) / 2)
+            if ratio > 0.4:
+                return "utf-16le"
+
+        # --- Heuristic UTF-16BE detection (no BOM) ---
+        zeros_in_even = sum(1 for i in range(0, len(data), 2) if data[i] == 0)
+        ratio_be = zeros_in_even / (len(data) / 2)
+        if ratio_be > 0.4:
+            return "utf-16be"
+
+        # Default
         return "utf-8"
+
 
     def index_file(self, progress_callback=None):
         start_time = time.time()
