@@ -1623,11 +1623,6 @@ class VirtualTextView(Gtk.DrawingArea):
         self.connect('resize', self.on_resize)
 
     def on_buffer_changed(self, *args):
-        # Recompute line width immediately when text changes
-        surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
-        cr = cairo.Context(surface)
-        self.renderer.calculate_max_line_width(cr, self.buf)
-
         # Update scrollbars after width changes
         self.update_scrollbar()
         self.queue_draw()
