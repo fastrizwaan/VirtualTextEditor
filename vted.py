@@ -2192,6 +2192,15 @@ class VirtualTextView(Gtk.DrawingArea):
         self.last_click_line = -1
         self.last_click_col = -1
         self.click_count = 0
+        
+        # Track word selection mode for drag-to-select-words
+        self.word_selection_mode = False
+        
+        # Track the original anchor word boundaries (for stable bi-directional drag)
+        self.anchor_word_start_line = -1
+        self.anchor_word_start_col = -1
+        self.anchor_word_end_line = -1
+        self.anchor_word_end_col = -1
 
     def on_right_click(self, gesture, n_press, x, y):
         """Show context menu on right-click"""
@@ -2380,6 +2389,9 @@ class VirtualTextView(Gtk.DrawingArea):
                     self.buf.cursor_line = ln
                     self.buf.cursor_col = 0
                 
+                # Enable word selection mode for drag (treat empty lines as "words")
+                self.word_selection_mode = True
+                
                 self.queue_draw()
                 return
 
@@ -2414,6 +2426,9 @@ class VirtualTextView(Gtk.DrawingArea):
                         self.buf.cursor_line = ln
                         self.buf.cursor_col = end_col
                 
+                # Enable word selection mode for drag
+                self.word_selection_mode = True
+                
                 self.queue_draw()
                 return
 
@@ -2423,6 +2438,14 @@ class VirtualTextView(Gtk.DrawingArea):
             self.buf.selection.set_end(ln, end_col)
             self.buf.cursor_line = ln
             self.buf.cursor_col = end_col
+            
+            # Enable word selection mode for drag AND store anchor word
+            self.word_selection_mode = True
+            self.anchor_word_start_line = ln
+            self.anchor_word_start_col = start_col
+            self.anchor_word_end_line = ln
+            self.anchor_word_end_col = end_col
+            
             self.queue_draw()
             return
 
@@ -2431,6 +2454,10 @@ class VirtualTextView(Gtk.DrawingArea):
         # ----------------------------------------------------------
         self.buf.selection.clear()
         self.ctrl.start_drag(ln, col)
+        
+        # Note: Don't clear word_selection_mode here! 
+        # It will be cleared in on_drag_begin if needed
+        
         self.queue_draw()
 
 
@@ -2493,6 +2520,12 @@ class VirtualTextView(Gtk.DrawingArea):
         ln, col = self.xy_to_line_col(x, y)
         # Nothing else needed — selection already started on press
         self.ctrl.start_drag(ln, col)
+        
+        # Clear word selection mode only if this is a single-click drag
+        # (click_count will be 1 for single-click, 2+ for multi-click)
+        if self.click_count <= 1:
+            self.word_selection_mode = False
+        
         self.queue_draw()
 
 
@@ -2546,7 +2579,66 @@ class VirtualTextView(Gtk.DrawingArea):
             return
 
         ln, col = self.xy_to_line_col(sx + dx, sy + dy)
-        self.ctrl.update_drag(ln, col)
+        
+        if self.word_selection_mode:
+            # Word-by-word selection mode
+            line_text = self.buf.get_line(ln)
+            
+            # Get selection anchor point (start of initially selected word)
+            sel_start_line = self.buf.selection.start_line if self.buf.selection.active else ln
+            sel_start_col = self.buf.selection.start_col if self.buf.selection.active else col
+            
+            # Also track the end of original selection to determine drag direction
+            sel_end_line = self.buf.selection.end_line if self.buf.selection.active else ln
+            sel_end_col = self.buf.selection.end_col if self.buf.selection.active else col
+            
+            # Handle empty lines
+            if len(line_text) == 0:
+                # Empty line - check if it's the last line (skip it)
+                if ln == self.buf.total() - 1:
+                    # Last empty line: don't extend to it, stay at previous position
+                    return
+                else:
+                    # Empty line not at EOF: treat entire line as one "word"
+                    # Use start or end based on direction
+                    if ln > sel_end_line or (ln == sel_end_line and 0 >= sel_end_col):
+                        # Dragging forward from end of selection
+                        self.ctrl.update_drag(ln, 0)
+                    else:
+                        # Dragging backward from start of selection
+                        self.ctrl.update_drag(ln, 0)
+            elif line_text and 0 <= col <= len(line_text):
+                # Line with text: snap to word boundaries
+                start_col, end_col = self.find_word_boundaries(line_text, min(col, len(line_text) - 1))
+                
+                # Use the ANCHOR word (originally double-clicked word) for direction detection
+                # This prevents flickering by keeping the reference point stable
+                anchor_start_line = self.anchor_word_start_line
+                anchor_start_col = self.anchor_word_start_col
+                anchor_end_line = self.anchor_word_end_line
+                anchor_end_col = self.anchor_word_end_col
+                
+                # Compare current position with anchor word to determine direction
+                if ln > anchor_end_line or (ln == anchor_end_line and start_col >= anchor_end_col):
+                    # Dragging forward (right/down): use end of word
+                    self.ctrl.update_drag(ln, end_col)
+                elif ln < anchor_start_line or (ln == anchor_start_line and end_col <= anchor_start_col):
+                    # Dragging backward (left/up): use start of word
+                    self.ctrl.update_drag(ln, start_col)
+                else:
+                    # Within or overlapping anchor word: maintain the anchor
+                    # Use end if we're more to the right, start if more to the left
+                    if col >= anchor_end_col:
+                        self.ctrl.update_drag(ln, end_col)
+                    else:
+                        self.ctrl.update_drag(ln, start_col)
+            else:
+                # Beyond text
+                self.ctrl.update_drag(ln, col)
+        else:
+            # Normal character-by-character selection
+            self.ctrl.update_drag(ln, col)
+        
         self.queue_draw()
 
 
@@ -2558,6 +2650,10 @@ class VirtualTextView(Gtk.DrawingArea):
 
     def on_drag_end(self, g, dx, dy):
         self.ctrl.end_drag()
+        
+        # Clear word selection mode
+        self.word_selection_mode = False
+        
         self.queue_draw()
 
 
