@@ -1259,8 +1259,10 @@ class Renderer:
         """
         if is_rtl:
             available = max(0, view_w - ln_width)
-            # Unified formula: right-align and apply scroll offset
-            return ln_width + max(0, available - text_w) - scroll_x
+            if scroll_x == 0:
+                return ln_width + max(0, available - text_w)
+            else:
+                return ln_width + available - scroll_x
         else:
             return ln_width - scroll_x
 
