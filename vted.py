@@ -1131,6 +1131,84 @@ class InputController:
             if extend_selection:
                 current_line = b.get_line(ln)
                 b.set_cursor(ln, len(current_line), extend_selection)
+
+    def move_word_left(self, extend_selection=False):
+        """Move cursor to the start of the previous word"""
+        b = self.buf
+        ln, col = b.cursor_line, b.cursor_col
+        line = b.get_line(ln)
+        
+        # Helper to check if character is a word character
+        import unicodedata
+        def is_word_char(ch):
+            if ch == '_':
+                return True
+            cat = unicodedata.category(ch)
+            return cat[0] in ('L', 'N', 'M')
+        
+        # If at start of line, go to end of previous line
+        if col == 0:
+            if ln > 0:
+                prev_line = b.get_line(ln - 1)
+                b.set_cursor(ln - 1, len(prev_line), extend_selection)
+            return
+        
+        # Skip whitespace to the left
+        while col > 0 and line[col - 1].isspace():
+            col -= 1
+        
+        if col == 0:
+            b.set_cursor(ln, col, extend_selection)
+            return
+        
+        # Now we're on a non-whitespace character
+        # Check what type it is and skip that type
+        if is_word_char(line[col - 1]):
+            # Skip word characters to the left
+            while col > 0 and is_word_char(line[col - 1]):
+                col -= 1
+        else:
+            # Skip symbols/punctuation to the left (treat as a "word")
+            while col > 0 and not line[col - 1].isspace() and not is_word_char(line[col - 1]):
+                col -= 1
+        
+        b.set_cursor(ln, col, extend_selection)
+    
+    def move_word_right(self, extend_selection=False):
+        """Move cursor to the start of the next word"""
+        b = self.buf
+        ln, col = b.cursor_line, b.cursor_col
+        line = b.get_line(ln)
+        
+        # Helper to check if character is a word character
+        import unicodedata
+        def is_word_char(ch):
+            if ch == '_':
+                return True
+            cat = unicodedata.category(ch)
+            return cat[0] in ('L', 'N', 'M')
+        
+        # If at end of line, go to start of next line
+        if col >= len(line):
+            if ln + 1 < b.total():
+                b.set_cursor(ln + 1, 0, extend_selection)
+            return
+        
+        # Check what type of character we're on and skip that type
+        if is_word_char(line[col]):
+            # Skip word characters to the right
+            while col < len(line) and is_word_char(line[col]):
+                col += 1
+        elif not line[col].isspace():
+            # Skip symbols/punctuation to the right (treat as a "word")
+            while col < len(line) and not line[col].isspace() and not is_word_char(line[col]):
+                col += 1
+        
+        # Skip whitespace to the right
+        while col < len(line) and line[col].isspace():
+            col += 1
+        
+        b.set_cursor(ln, col, extend_selection)
     def move_home(self, extend_selection=False):
         """Move to beginning of line"""
         b = self.buf
@@ -2025,9 +2103,8 @@ class VirtualTextView(Gtk.DrawingArea):
             return True
         elif name == "Left":
             if ctrl_pressed:
-                # Word navigation (simplified - just jumps more)
-                for _ in range(5):
-                    self.ctrl.move_left(extend_selection=shift_pressed)
+                # Proper word navigation
+                self.ctrl.move_word_left(extend_selection=shift_pressed)
             else:
                 self.ctrl.move_left(extend_selection=shift_pressed)
             self.keep_cursor_visible()
@@ -2036,9 +2113,8 @@ class VirtualTextView(Gtk.DrawingArea):
             return True
         elif name == "Right":
             if ctrl_pressed:
-                # Word navigation (simplified)
-                for _ in range(5):
-                    self.ctrl.move_right(extend_selection=shift_pressed)
+                # Proper word navigation
+                self.ctrl.move_word_right(extend_selection=shift_pressed)
             else:
                 self.ctrl.move_right(extend_selection=shift_pressed)
             self.keep_cursor_visible()
