@@ -1459,9 +1459,23 @@ class Renderer:
                                     text_end_x - sel_start_x, self.line_h)
                         cr.fill()
                     
-                    # Draw newline indicator extending to viewport edge
-                    newline_start_x = text_end_x if text else ln_width
-                    newline_end_x = alloc.width  # Extend to viewport edge
+                    # Draw newline indicator
+                    # For RTL: newline area is on the LEFT (from ln_width to text start)
+                    # For LTR: newline area is on the RIGHT (from text end to viewport edge)
+                    if is_rtl:
+                        # RTL: draw from line number area to start of text
+                        if text:
+                            # Draw from ln_width to the leftmost edge of the text
+                            newline_start_x = ln_width
+                            newline_end_x = base_x  # base_x is where RTL text starts
+                        else:
+                            # Empty line: draw from ln_width to viewport edge
+                            newline_start_x = ln_width
+                            newline_end_x = alloc.width
+                    else:
+                        # LTR: draw from text end to viewport edge
+                        newline_start_x = text_end_x if text else ln_width
+                        newline_end_x = alloc.width
                     
                     # Use slightly darker/different shade for newline area
                     cr.set_source_rgba(*self.selection_background_color, 0.7)
@@ -2351,7 +2365,7 @@ class VirtualTextView(Gtk.DrawingArea):
                 return
 
             # Case 2: double-click at end-of-line → select ONLY newline zone
-            if col >= line_len:
+            if col > line_len:
                 # Select purely the newline area: from line_len → line_len + 1
                 self.buf.selection.set_start(ln, line_len)
                 self.buf.selection.set_end(ln, line_len + 1)  # triggers viewport extension
@@ -2439,6 +2453,8 @@ class VirtualTextView(Gtk.DrawingArea):
         self.queue_draw()
 
 
+
+
     def xy_to_line_col(self, x, y):
         surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
         cr = cairo.Context(surface)
@@ -2467,13 +2483,13 @@ class VirtualTextView(Gtk.DrawingArea):
         if rtl:
             # RTL text: newline area is to the LEFT of the text (negative col_px)
             if col_px < 0:
-                # Clicked in newline area
-                return ln, len(text)
+                # Clicked in newline area - return special value len(text)+1
+                return ln, len(text) + 1
         else:
             # LTR text: newline area is to the RIGHT of the text
             if col_px >= text_w:
-                # Clicked in newline area
-                return ln, len(text)
+                # Clicked in newline area - return special value len(text)+1
+                return ln, len(text) + 1
         
         col_px = max(0, col_px)
         col = self.pixel_to_column(cr, text, col_px)
