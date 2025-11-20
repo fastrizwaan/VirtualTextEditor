@@ -1019,9 +1019,13 @@ class InputController:
         self.dragging = True
         self.drag_start_line = ln
         self.drag_start_col = col
+        
+        # Set cursor first (this clears old selection and sets cursor position)
+        self.buf.set_cursor(ln, col, extend_selection=False)
+        
+        # Now establish the new selection anchor at the current cursor position
         self.buf.selection.set_start(ln, col)
         self.buf.selection.set_end(ln, col)
-        self.buf.set_cursor(ln, col, extend_selection=True)
 
     def update_drag(self, ln, col):
         if self.dragging:
@@ -1637,44 +1641,134 @@ class Renderer:
                 cr.stroke()
 
         # ============================================================
-        # NORMAL CURSOR (strong + weak caret, gedit-style)
+        # CURSOR
         # ============================================================
         if cursor_visible and line_visible:
-            line_text = buf.get_line(cl)
+            cursor_text = buf.get_line(cl)
+            from_scroll = cl - scroll_line
+            cy = from_scroll * self.line_h
 
-            cur_l = PangoCairo.create_layout(cr)
-            cur_l.set_font_description(self.font)
-            cur_l.set_auto_dir(True)
-            cur_l.set_text(line_text if line_text else " ", -1)
+            # Use same layout logic as above
+            layout = self.create_text_layout(cr, cursor_text if cursor_text else " ")
+            is_rtl = detect_rtl_line(cursor_text)
+            text_w, _ = layout.get_pixel_size()
+            view_w = alloc.width
+            base_x = self.calculate_text_base_x(is_rtl, text_w, view_w, ln_width, scroll_x)
 
-            is_rtl = detect_rtl_line(line_text)
-            text_w, _ = cur_l.get_pixel_size()
-            base_x = self.calculate_text_base_x(is_rtl, text_w, alloc.width, ln_width, scroll_x)
+            byte_idx = visual_byte_index(cursor_text, cc)
+            strong_pos, _ = layout.get_cursor_pos(byte_idx)
+            cx = base_x + (strong_pos.x // Pango.SCALE)
 
-            byte_index = visual_byte_index(line_text, cc)
-            strong_pos, weak_pos = cur_l.get_cursor_pos(byte_index)
-
-            cx_strong = base_x + strong_pos.x // Pango.SCALE
-            cx_weak   = base_x + weak_pos.x   // Pango.SCALE
-            cy = (cl - scroll_line) * self.line_h
-
-            opacity = 0.5 + 0.5 * math.cos(cursor_phase * math.pi)
-            opacity = max(0.0, min(1.0, opacity))
-
-            cr.set_line_width(1.5)
-
-            # Strong caret
-            cr.set_source_rgba(1, 1, 1, opacity)
-            cr.move_to(cx_strong + 0.4, cy)
-            cr.line_to(cx_strong + 0.4, cy + self.text_h)
+            # Draw cursor line (small vertical bar)
+            phase = cursor_phase if cursor_phase is not None else 0.0
+            alpha = 0.3 + 0.7 * phase
+            cr.set_source_rgba(0, 0.5, 1.0, alpha)
+            cr.set_line_width(2)
+            cr.move_to(cx, cy)
+            cr.line_to(cx, cy + self.line_h)
             cr.stroke()
-
-            # Weak caret (ghost-carets) - only show if different from strong AND text is actually bidirectional
-            if weak_pos.x != strong_pos.x and is_rtl:
-                cr.set_source_rgba(1, 1, 1, opacity * 0.45)
-                cr.move_to(cx_weak + 0.4, cy)
-                cr.line_to(cx_weak + 0.4, cy + self.text_h)
-                cr.stroke()
+        
+        # ============================================================
+        # DRAG-AND-DROP PREVIEW OVERLAY
+        # ============================================================
+        # Draw preview overlay at drop position
+        if hasattr(buf, '_view') and buf._view:
+            view = buf._view
+            if view.drag_and_drop_mode and view.drop_position_line >= 0:
+                drop_ln = view.drop_position_line
+                drop_col = view.drop_position_col
+                
+                # Check if drop position is within original selection (no-op)
+                drop_in_selection = False
+                if buf.selection.has_selection():
+                    bounds = buf.selection.get_bounds()
+                    if bounds and bounds[0] is not None:
+                        sel_start_line, sel_start_col, sel_end_line, sel_end_col = bounds
+                        
+                        if sel_start_line == sel_end_line:
+                            # Single line selection
+                            if drop_ln == sel_start_line and sel_start_col <= drop_col <= sel_end_col:
+                                drop_in_selection = True
+                        else:
+                            # Multi-line selection
+                            if drop_ln == sel_start_line and drop_col >= sel_start_col:
+                                drop_in_selection = True
+                            elif drop_ln == sel_end_line and drop_col <= sel_end_col:
+                                drop_in_selection = True
+                            elif sel_start_line < drop_ln < sel_end_line:
+                                drop_in_selection = True
+                
+                # Draw overlay even if over selection, but skip cursor
+                if scroll_line <= drop_ln < scroll_line + max_vis:
+                    drop_y = (drop_ln - scroll_line) * self.line_h
+                    drop_text = buf.get_line(drop_ln)
+                    
+                    # Calculate drop position
+                    layout = self.create_text_layout(cr, drop_text if drop_text else " ")
+                    is_rtl = detect_rtl_line(drop_text)
+                    text_w, _ = layout.get_pixel_size()
+                    view_w = alloc.width
+                    base_x = self.calculate_text_base_x(is_rtl, text_w, view_w, ln_width, scroll_x)
+                    
+                    # Get x position for drop column
+                    drop_byte_idx = visual_byte_index(drop_text, min(drop_col, len(drop_text)))
+                    strong_pos, _ = layout.get_cursor_pos(drop_byte_idx)
+                    drop_x = base_x + (strong_pos.x // Pango.SCALE)
+                    
+                    # Determine colors based on copy (Ctrl) vs move mode
+                    is_copy = view.ctrl_pressed_during_drag
+                    if is_copy:
+                        # Green for copy
+                        cursor_color = (0.0, 1.0, 0.3, 0.9)
+                        bg_color = (0.0, 0.8, 0.3, 1.0)  # Opaque green background
+                        border_color = (0.0, 1.0, 0.3, 1.0)
+                    else:
+                        # Orange for move
+                        cursor_color = (1.0, 0.6, 0.0, 0.9)
+                        bg_color = (1.0, 0.5, 0.0, 1.0)  # Opaque orange background
+                        border_color = (1.0, 0.6, 0.0, 1.0)
+                    
+                    # Draw cursor at drop position ONLY if not over selection
+                    if not drop_in_selection:
+                        cr.set_source_rgba(*cursor_color)
+                        cr.set_line_width(2)
+                        cr.move_to(drop_x, drop_y)
+                        cr.line_to(drop_x, drop_y + self.line_h)
+                        cr.stroke()
+                    
+                    # Draw viewport border (1 pixel) - always show
+                    cr.set_source_rgba(*border_color)
+                    cr.set_line_width(1)
+                    cr.rectangle(0, 0, alloc.width, alloc.height)
+                    cr.stroke()
+                    
+                    # Draw the dragged text as overlay with background (no border) - always show
+                    dragged_text = view.dragged_text
+                    if dragged_text:
+                        # Check if multi-line selection
+                        is_multiline = '\n' in dragged_text
+                        
+                        # Create layout for dragged text
+                        overlay_layout = self.create_text_layout(cr, dragged_text)
+                        overlay_w, overlay_h = overlay_layout.get_pixel_size()
+                        
+                        # Offset the overlay below the cursor so pointer is above it
+                        vertical_offset = 20  # Pixels below the cursor
+                        drop_y_offset = drop_y + vertical_offset
+                        
+                        # Draw background only for single-line selections
+                        if not is_multiline:
+                            padding = 4
+                            cr.set_source_rgba(*bg_color)
+                            cr.rectangle(drop_x - padding, drop_y_offset - padding, 
+                                       overlay_w + 2*padding, self.line_h + 2*padding)
+                            cr.fill()
+                        
+                        # Draw the text with transparency
+                        r, g, b = self.text_foreground_color
+                        cr.set_source_rgba(r, g, b, 0.7)  # 70% opacity
+                        cr.move_to(drop_x, drop_y_offset)
+                        PangoCairo.show_layout(cr, overlay_layout)
 
 
 # ============================================================
@@ -1686,6 +1780,8 @@ class VirtualTextView(Gtk.DrawingArea):
     def __init__(self, buf):
         super().__init__()
         self.buf = buf
+        # Add reference from buffer to view for drag-and-drop
+        buf._view = self
         self.renderer = Renderer()
         self.ctrl = InputController(self, buf)
         self.scroll_line = 0
@@ -2277,6 +2373,19 @@ class VirtualTextView(Gtk.DrawingArea):
         self.anchor_word_start_col = -1
         self.anchor_word_end_line = -1
         self.anchor_word_end_col = -1
+        
+        # Track drag-and-drop mode for moving/copying selected text
+        self.drag_and_drop_mode = False
+        self.dragged_text = ""
+        self.drop_position_line = -1
+        self.drop_position_col = -1
+        self.ctrl_pressed_during_drag = False  # Track if Ctrl is pressed during drag
+        
+        # Track if we clicked inside a selection (to handle click-to-clear vs drag)
+        self._clicked_in_selection = False
+        
+        # Track if a drag might start (deferred until movement)
+        self._drag_pending = False
 
     def on_right_click(self, gesture, n_press, x, y):
         """Show context menu on right-click"""
@@ -2528,8 +2637,44 @@ class VirtualTextView(Gtk.DrawingArea):
         # ----------------------------------------------------------
         # SINGLE CLICK (unchanged)
         # ----------------------------------------------------------
+        # Check if clicking inside existing selection - if so, defer clearing
+        # until we know it's not a drag operation
+        if self.buf.selection.has_selection():
+            bounds = self.buf.selection.get_bounds()
+            if bounds and bounds[0] is not None:
+                start_line, start_col, end_line, end_col = bounds
+                
+                # Check if click is within selection
+                click_in_selection = False
+                if start_line == end_line:
+                    if ln == start_line and start_col <= col < end_col:
+                        click_in_selection = True
+                else:
+                    if ln == start_line and col >= start_col:
+                        click_in_selection = True
+                    elif ln == end_line and col < end_col:
+                        click_in_selection = True
+                    elif start_line < ln < end_line:
+                        click_in_selection = True
+                
+                if click_in_selection:
+                    # Don't clear selection yet - might be starting a drag
+                    # Just update cursor position
+                    self.buf.cursor_line = ln
+                    self.buf.cursor_col = col
+                    self._clicked_in_selection = True
+                    self.queue_draw()
+                    return
+        
+        # Normal single click - clear selection and start new drag
+        self._clicked_in_selection = False
         self.buf.selection.clear()
         self.ctrl.start_drag(ln, col)
+        
+        # Set pending click for release handler
+        self._pending_click = True
+        self._click_ln = ln
+        self._click_col = col
         
         # Note: Don't clear word_selection_mode here! 
         # It will be cleared in on_drag_begin if needed
@@ -2594,8 +2739,54 @@ class VirtualTextView(Gtk.DrawingArea):
 
     def on_drag_begin(self, g, x, y):
         ln, col = self.xy_to_line_col(x, y)
-        # Nothing else needed — selection already started on press
-        self.ctrl.start_drag(ln, col)
+        
+        # Check if clicking on selected text
+        if self.buf.selection.has_selection():
+            start_line, start_col, end_line, end_col = self.buf.selection.get_bounds()
+            
+            # Check if click is within selection
+            click_in_selection = False
+            if start_line == end_line:
+                # Single line selection
+                if ln == start_line and start_col <= col < end_col:
+                    click_in_selection = True
+            else:
+                # Multi-line selection
+                if ln == start_line and col >= start_col:
+                    click_in_selection = True
+                elif ln == end_line and col < end_col:
+                    click_in_selection = True
+                elif start_line < ln < end_line:
+                    click_in_selection = True
+            
+            if click_in_selection:
+                # We might be starting a drag, but wait for actual movement
+                self._drag_pending = True
+                # Don't set drag_and_drop_mode yet - wait for on_drag_update
+                self.drag_and_drop_mode = False
+                
+                # Store the selected text (just in case)
+                self.dragged_text = self.buf.get_selected_text()
+                
+                # Don't start normal selection drag - this preserves the selection
+                # Don't call ctrl.start_drag() to keep selection visible
+                return
+        
+        # Normal drag behavior
+        self.drag_and_drop_mode = False
+        self._drag_pending = False
+        self._pending_click = False  # We are dragging, so cancel pending click
+        
+        if self.word_selection_mode:
+            # In word selection mode (after double-click), we want to KEEP the current selection
+            # and just start dragging from here.
+            # So we manually set dragging state without clearing selection via start_drag()
+            self.ctrl.dragging = True
+            self.ctrl.drag_start_line = ln
+            self.ctrl.drag_start_col = col
+        else:
+            # Normal selection drag - starts new selection
+            self.ctrl.start_drag(ln, col)
         
         # Clear word selection mode only if this is a single-click drag
         # (click_count will be 1 for single-click, 2+ for multi-click)
@@ -2654,6 +2845,30 @@ class VirtualTextView(Gtk.DrawingArea):
         if not ok:
             return
 
+        # Check if we have a pending drag that needs to be activated
+        if self._drag_pending:
+            # We moved! Activate drag-and-drop mode
+            self.drag_and_drop_mode = True
+            self._drag_pending = False
+            # Now we know it's a drag, so it's NOT a click-to-clear
+            self._clicked_in_selection = False
+            self.queue_draw()
+
+        # In drag-and-drop mode, track drop position for visual feedback
+        if self.drag_and_drop_mode:
+            drop_ln, drop_col = self.xy_to_line_col(sx + dx, sy + dy)
+            self.drop_position_line = drop_ln
+            self.drop_position_col = drop_col
+            
+            # Check if Ctrl is pressed for copy vs move visual feedback
+            event = g.get_current_event()
+            if event:
+                state = event.get_modifier_state()
+                self.ctrl_pressed_during_drag = (state & Gdk.ModifierType.CONTROL_MASK) != 0
+            
+            self.queue_draw()
+            return
+
         ln, col = self.xy_to_line_col(sx + dx, sy + dy)
         
         if self.word_selection_mode:
@@ -2694,20 +2909,27 @@ class VirtualTextView(Gtk.DrawingArea):
                 anchor_end_line = self.anchor_word_end_line
                 anchor_end_col = self.anchor_word_end_col
                 
-                # Compare current position with anchor word to determine direction
-                if ln > anchor_end_line or (ln == anchor_end_line and start_col >= anchor_end_col):
-                    # Dragging forward (right/down): use end of word
+                # Compare current position with anchor word start to determine direction
+                # If we are at or after the start of the anchor word, we treat it as a forward drag
+                # (even if we are inside the anchor word itself)
+                is_forward = False
+                if ln > anchor_start_line:
+                    is_forward = True
+                elif ln == anchor_start_line and col >= anchor_start_col:
+                    is_forward = True
+                
+                if is_forward:
+                    # Dragging Forward (LTR):
+                    # Anchor point should be the START of the original word
+                    self.buf.selection.set_start(anchor_start_line, anchor_start_col)
+                    # Cursor (end point) should be the END of the current word
                     self.ctrl.update_drag(ln, end_col)
-                elif ln < anchor_start_line or (ln == anchor_start_line and end_col <= anchor_start_col):
-                    # Dragging backward (left/up): use start of word
-                    self.ctrl.update_drag(ln, start_col)
                 else:
-                    # Within or overlapping anchor word: maintain the anchor
-                    # Use end if we're more to the right, start if more to the left
-                    if col >= anchor_end_col:
-                        self.ctrl.update_drag(ln, end_col)
-                    else:
-                        self.ctrl.update_drag(ln, start_col)
+                    # Dragging Backward (RTL):
+                    # Anchor point should be the END of the original word
+                    self.buf.selection.set_start(anchor_end_line, anchor_end_col)
+                    # Cursor (end point) should be the START of the current word
+                    self.ctrl.update_drag(ln, start_col)
             else:
                 # Beyond text
                 self.ctrl.update_drag(ln, col)
@@ -2725,7 +2947,87 @@ class VirtualTextView(Gtk.DrawingArea):
         self.queue_draw()
 
     def on_drag_end(self, g, dx, dy):
-        self.ctrl.end_drag()
+        # If we clicked in selection but didn't actually drag (drag_and_drop_mode wasn't set),
+        # then we should clear the selection now
+        if self._clicked_in_selection and not self.drag_and_drop_mode:
+            self.buf.selection.clear()
+            self._clicked_in_selection = False
+            self.queue_draw()
+            
+        self._drag_pending = False
+        
+        if self.drag_and_drop_mode:
+            # Drag-and-drop mode: move or copy text
+            ok, sx, sy = g.get_start_point()
+            if ok:
+                drop_ln, drop_col = self.xy_to_line_col(sx + dx, sy + dy)
+                
+                # Get current event to check for Ctrl key
+                event = g.get_current_event()
+                ctrl_pressed = False
+                if event:
+                    state = event.get_modifier_state()
+                    ctrl_pressed = (state & Gdk.ModifierType.CONTROL_MASK) != 0
+                
+                # Get original selection bounds
+                bounds = self.buf.selection.get_bounds()
+                if not bounds or bounds[0] is None:
+                    # No valid selection, exit drag mode
+                    self.drag_and_drop_mode = False
+                    self.dragged_text = ""
+                    self.queue_draw()
+                    return
+                
+                start_line, start_col, end_line, end_col = bounds
+                
+                # Check if dropping inside the original selection (no-op)
+                drop_in_selection = False
+                if start_line == end_line:
+                    if drop_ln == start_line and start_col <= drop_col <= end_col:
+                        drop_in_selection = True
+                else:
+                    if drop_ln == start_line and drop_col >= start_col:
+                        drop_in_selection = True
+                    elif drop_ln == end_line and drop_col <= end_col:
+                        drop_in_selection = True
+                    elif start_line < drop_ln < end_line:
+                        drop_in_selection = True
+                
+                if not drop_in_selection and self.dragged_text:
+                    if ctrl_pressed:
+                        # Copy: insert at drop position, keep original
+                        self.buf.set_cursor(drop_ln, drop_col)
+                        self.buf.insert_text(self.dragged_text)
+                    else:
+                        # Move: delete original, insert at drop position
+                        # Delete first
+                        self.buf.delete_selection()
+                        # Recalculate drop position if it's after the deleted text
+                        if drop_ln > end_line or (drop_ln == end_line and drop_col > end_col):
+                            # Adjust for deleted text
+                            if start_line == end_line:
+                                # Single line deletion
+                                chars_deleted = end_col - start_col
+                                if drop_ln == start_line:
+                                    drop_col -= chars_deleted
+                            else:
+                                # Multi-line deletion
+                                lines_deleted = end_line - start_line
+                                if drop_ln > end_line:
+                                    drop_ln -= lines_deleted
+                        
+                        # Insert at adjusted position
+                        self.buf.set_cursor(drop_ln, drop_col)
+                        self.buf.insert_text(self.dragged_text)
+                
+                self.keep_cursor_visible()
+            
+            # Exit drag-and-drop mode
+            self.drag_and_drop_mode = False
+            self.dragged_text = ""
+        else:
+            # Normal drag end
+            self.ctrl.end_drag()
         
         # Clear word selection mode
         self.word_selection_mode = False
