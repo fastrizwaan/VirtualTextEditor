@@ -995,56 +995,191 @@ class VirtualBuffer(GObject.Object):
         self.emit("changed")
         
     def move_word_left_with_text(self):
-        """Move current word left by swapping with previous word (Alt+Left)"""
+        """Move text left: full words swap, partial selection moves 1 char (Alt+Left)"""
         ln = self.cursor_line
         col = self.cursor_col
         line = self.get_line(ln)
-        
-        if not line:
-            return
         
         def is_word_separator(ch):
             """Check if character is a word separator (space, underscore, or punctuation)"""
             return ch in ' _' or not ch.isalnum()
         
-        # Find current word boundaries (separated by space, underscore, or punctuation)
-        # Find start of current word
+        # Check if we have a selection
+        if self.selection.has_selection():
+            bounds = self.selection.get_bounds()
+            if bounds and bounds[0] is not None:
+                start_ln, start_col, end_ln, end_col = bounds
+                
+                # Handle multi-line selections - move character wise
+                if start_ln != end_ln:
+                    # 1. Identify char before
+                    if start_col > 0:
+                        # Char on same line
+                        prev_ln = start_ln
+                        prev_col = start_col - 1
+                        char_before = self.get_line(start_ln)[start_col - 1]
+                    else:
+                        # Newline from previous line
+                        if start_ln == 0:
+                            return # Can't move left
+                        prev_ln = start_ln - 1
+                        prev_line_content = self.get_line(prev_ln)
+                        prev_col = len(prev_line_content)
+                        char_before = '\n'
+                        
+                    # 2. Get selected text
+                    selected_text = self.get_selected_text()
+                    
+                    # 3. Extend selection to include char before
+                    # NOTE: set_start resets end, so we must restore the end
+                    self.selection.set_start(prev_ln, prev_col)
+                    self.selection.set_end(end_ln, end_col)
+                    
+                    # 4. Delete extended range
+                    self.delete_selection()
+                    
+                    # 5. Insert swapped: selected_text + char_before
+                    full_text = selected_text + char_before
+                    
+                    # Remember start position (cursor is already at prev_ln, prev_col from delete)
+                    ins_start_ln = self.cursor_line
+                    ins_start_col = self.cursor_col
+                    
+                    self.insert_text(full_text)
+                    
+                    # 6. Restore selection (selected_text part)
+                    
+                    # 6. Restore selection (selected_text part)
+                    # Calculate end of selected_text relative to insertion start
+                    sel_lines = selected_text.split('\n')
+                    if len(sel_lines) == 1:
+                        sel_end_ln = ins_start_ln
+                        sel_end_col = ins_start_col + len(selected_text)
+                    else:
+                        sel_end_ln = ins_start_ln + len(sel_lines) - 1
+                        sel_end_col = len(sel_lines[-1])
+                    
+                    self.selection.set_start(ins_start_ln, ins_start_col)
+                    self.selection.set_end(sel_end_ln, sel_end_col)
+                    
+                    self.emit("changed")
+                    return
+                
+                selected_text = line[start_col:end_col]
+                
+                # Check if selection is full words (starts and ends at word boundaries)
+                is_full_word_selection = True
+                
+                # Check start boundary
+                if start_col > 0 and not is_word_separator(line[start_col - 1]):
+                    is_full_word_selection = False
+                if start_col < len(line) and is_word_separator(line[start_col]):
+                    is_full_word_selection = False
+                    
+                # Check end boundary
+                if end_col < len(line) and not is_word_separator(line[end_col]):
+                    is_full_word_selection = False
+                if end_col > 0 and is_word_separator(line[end_col - 1]):
+                    is_full_word_selection = False
+                
+                if is_full_word_selection:
+                    # Full word(s) selected - swap with previous word
+                    # Find previous word
+                    prev_word_end = start_col - 1
+                    while prev_word_end > 0 and is_word_separator(line[prev_word_end]):
+                        prev_word_end -= 1
+                    prev_word_end += 1
+                    
+                    if prev_word_end == 0:
+                        return  # No previous word
+                    
+                    prev_word_start = prev_word_end - 1
+                    while prev_word_start > 0 and not is_word_separator(line[prev_word_start - 1]):
+                        prev_word_start -= 1
+                    
+                    prev_word = line[prev_word_start:prev_word_end]
+                    separators = line[prev_word_end:start_col]
+                    
+                    # Rebuild line with swapped text
+                    new_line = (line[:prev_word_start] + 
+                               selected_text + 
+                               separators +
+                               prev_word + 
+                               line[end_col:])
+                    
+                    # Update line
+                    if ln in self.inserted_lines:
+                        self.inserted_lines[ln] = new_line
+                    else:
+                        self.edits[ln] = new_line
+                    
+                    # Update selection to moved position
+                    self.selection.set_start(ln, prev_word_start)
+                    self.selection.set_end(ln, prev_word_start + len(selected_text))
+                    self.cursor_col = prev_word_start
+                    
+                    self.emit("changed")
+                else:
+                    # Partial selection - move 1 character left
+                    if start_col == 0:
+                        return  # Can't move left
+                    
+                    # Extract selection and character before it
+                    char_before = line[start_col - 1]
+                    
+                    # Rebuild line: move selection 1 char left
+                    new_line = (line[:start_col - 1] + 
+                               selected_text + 
+                               char_before + 
+                               line[end_col:])
+                    
+                    # Update line
+                    if ln in self.inserted_lines:
+                        self.inserted_lines[ln] = new_line
+                    else:
+                        self.edits[ln] = new_line
+                    
+                    # Update selection
+                    self.selection.set_start(ln, start_col - 1)
+                    self.selection.set_end(ln, end_col - 1)
+                    self.cursor_col = start_col - 1
+                    
+                    self.emit("changed")
+                return
+        
+        # No selection - swap current word with previous word
+        # Find current word boundaries
         word_start = col
         while word_start > 0 and not is_word_separator(line[word_start - 1]):
             word_start -= 1
         
-        # Find end of current word
         word_end = col
         while word_end < len(line) and not is_word_separator(line[word_end]):
             word_end += 1
         
-        # Check if we're at the beginning
         if word_start == 0:
             return  # Can't move left
         
-        # Find previous word boundaries
-        # Skip separators before current word
+        # Find previous word
         prev_word_end = word_start - 1
         while prev_word_end > 0 and is_word_separator(line[prev_word_end]):
             prev_word_end -= 1
-        prev_word_end += 1  # Point to position after last char of prev word
+        prev_word_end += 1
         
         if prev_word_end == 0:
             return  # No previous word
         
-        # Find start of previous word
         prev_word_start = prev_word_end - 1
         while prev_word_start > 0 and not is_word_separator(line[prev_word_start - 1]):
             prev_word_start -= 1
         
-        # Extract words (alphanumeric only)
         current_word = line[word_start:word_end]
         prev_word = line[prev_word_start:prev_word_end]
         
-        # Rebuild line with swapped words (keeping separators in place)
+        # Rebuild line with swapped words
         new_line = (line[:prev_word_start] + 
                    current_word + 
-                   line[prev_word_end:word_start] +  # separators between words
+                   line[prev_word_end:word_start] +
                    prev_word + 
                    line[word_end:])
         
@@ -1054,61 +1189,195 @@ class VirtualBuffer(GObject.Object):
         else:
             self.edits[ln] = new_line
         
-        # Move cursor to the moved word
+        # Move cursor and select
         self.cursor_col = prev_word_start
-        
-        # Select the moved word
         self.selection.set_start(ln, prev_word_start)
         self.selection.set_end(ln, prev_word_start + len(current_word))
         
         self.emit("changed")
     
     def move_word_right_with_text(self):
-        """Move current word right by swapping with next word (Alt+Right)"""
+        """Move text right: full words swap, partial selection moves 1 char (Alt+Right)"""
         ln = self.cursor_line
         col = self.cursor_col
         line = self.get_line(ln)
-        
-        if not line:
-            return
         
         def is_word_separator(ch):
             """Check if character is a word separator (space, underscore, or punctuation)"""
             return ch in ' _' or not ch.isalnum()
         
-        # Find current word boundaries (separated by space, underscore, or punctuation)
-        # Find start of current word
+        # Check if we have a selection
+        if self.selection.has_selection():
+            bounds = self.selection.get_bounds()
+            if bounds and bounds[0] is not None:
+                start_ln, start_col, end_ln, end_col = bounds
+                
+                # Handle multi-line selections - move character wise
+                if start_ln != end_ln:
+                    # 1. Identify char after
+                    last_line = self.get_line(end_ln)
+                    if end_col < len(last_line):
+                        # Char on same line
+                        next_ln = end_ln
+                        next_col = end_col + 1
+                        char_after = last_line[end_col]
+                    else:
+                        # Newline at end of line
+                        if end_ln >= self.total() - 1:
+                            return # Can't move right
+                        next_ln = end_ln + 1
+                        next_col = 0
+                        char_after = '\n'
+                        
+                    # 2. Get selected text
+                    selected_text = self.get_selected_text()
+                    
+                    # 3. Extend selection to include char after
+                    self.selection.set_end(next_ln, next_col)
+                    
+                    # 4. Delete extended range
+                    self.delete_selection()
+                    
+                    # 5. Insert swapped: char_after + selected_text
+                    full_text = char_after + selected_text
+                    
+                    # Remember start position (cursor is already at start_ln, start_col from delete)
+                    ins_start_ln = self.cursor_line
+                    ins_start_col = self.cursor_col
+                    
+                    self.insert_text(full_text)
+                    
+                    # 6. Restore selection (selected_text part)
+                    # Calculate start of selected_text (after char_after)
+                    char_lines = char_after.split('\n')
+                    if len(char_lines) == 1:
+                        sel_start_ln = ins_start_ln
+                        sel_start_col = ins_start_col + len(char_after)
+                    else:
+                        sel_start_ln = ins_start_ln + len(char_lines) - 1
+                        sel_start_col = len(char_lines[-1])
+                        
+                    # End is current cursor
+                    sel_end_ln = self.cursor_line
+                    sel_end_col = self.cursor_col
+                    
+                    self.selection.set_start(sel_start_ln, sel_start_col)
+                    self.selection.set_end(sel_end_ln, sel_end_col)
+                    
+                    self.emit("changed")
+                    return
+                
+                selected_text = line[start_col:end_col]
+                
+                # Check if selection is full words (starts and ends at word boundaries)
+                is_full_word_selection = True
+                
+                # Check start boundary
+                if start_col > 0 and not is_word_separator(line[start_col - 1]):
+                    is_full_word_selection = False
+                if start_col < len(line) and is_word_separator(line[start_col]):
+                    is_full_word_selection = False
+                    
+                # Check end boundary
+                if end_col < len(line) and not is_word_separator(line[end_col]):
+                    is_full_word_selection = False
+                if end_col > 0 and is_word_separator(line[end_col - 1]):
+                    is_full_word_selection = False
+                
+                if is_full_word_selection:
+                    # Full word(s) selected - swap with next word
+                    # Find next word
+                    next_word_start = end_col
+                    while next_word_start < len(line) and is_word_separator(line[next_word_start]):
+                        next_word_start += 1
+                    
+                    if next_word_start >= len(line):
+                        return  # No next word
+                    
+                    next_word_end = next_word_start
+                    while next_word_end < len(line) and not is_word_separator(line[next_word_end]):
+                        next_word_end += 1
+                    
+                    next_word = line[next_word_start:next_word_end]
+                    separators = line[end_col:next_word_start]
+                    
+                    # Rebuild line with swapped text
+                    new_line = (line[:start_col] + 
+                               next_word + 
+                               separators +
+                               selected_text + 
+                               line[next_word_end:])
+                    
+                    # Update line
+                    if ln in self.inserted_lines:
+                        self.inserted_lines[ln] = new_line
+                    else:
+                        self.edits[ln] = new_line
+                    
+                    # Update selection to moved position
+                    new_start = start_col + len(next_word) + len(separators)
+                    self.selection.set_start(ln, new_start)
+                    self.selection.set_end(ln, new_start + len(selected_text))
+                    self.cursor_col = new_start
+                    
+                    self.emit("changed")
+                else:
+                    # Partial selection - move 1 character right
+                    if end_col >= len(line):
+                        return  # Can't move right
+                    
+                    # Extract selection and character after it
+                    char_after = line[end_col]
+                    
+                    # Rebuild line: move selection 1 char right
+                    new_line = (line[:start_col] + 
+                               char_after + 
+                               selected_text + 
+                               line[end_col + 1:])
+                    
+                    # Update line
+                    if ln in self.inserted_lines:
+                        self.inserted_lines[ln] = new_line
+                    else:
+                        self.edits[ln] = new_line
+                    
+                    # Update selection
+                    self.selection.set_start(ln, start_col + 1)
+                    self.selection.set_end(ln, end_col + 1)
+                    self.cursor_col = start_col + 1
+                    
+                    self.emit("changed")
+                return
+        
+        # No selection - swap current word with next word
+        # Find current word boundaries
         word_start = col
         while word_start > 0 and not is_word_separator(line[word_start - 1]):
             word_start -= 1
         
-        # Find end of current word
         word_end = col
         while word_end < len(line) and not is_word_separator(line[word_end]):
             word_end += 1
         
-        # Skip separators after current word to find next word
+        # Find next word
         next_word_start = word_end
         while next_word_start < len(line) and is_word_separator(line[next_word_start]):
             next_word_start += 1
         
-        # Check if there's a next word
         if next_word_start >= len(line):
             return  # No next word
         
-        # Find end of next word
         next_word_end = next_word_start
         while next_word_end < len(line) and not is_word_separator(line[next_word_end]):
             next_word_end += 1
         
-        # Extract words (alphanumeric only)
         current_word = line[word_start:word_end]
         next_word = line[next_word_start:next_word_end]
         
-        # Rebuild line with swapped words (keeping separators in place)
+        # Rebuild line with swapped words
         new_line = (line[:word_start] + 
                    next_word + 
-                   line[word_end:next_word_start] +  # separators between words
+                   line[word_end:next_word_start] +
                    current_word + 
                    line[next_word_end:])
         
@@ -1118,21 +1387,115 @@ class VirtualBuffer(GObject.Object):
         else:
             self.edits[ln] = new_line
         
-        # Move cursor to the moved word's new position
-        # After swap: word_start has next_word, then separators, then current_word
+        # Move cursor and select
         new_current_word_pos = word_start + len(next_word) + (next_word_start - word_end)
         self.cursor_col = new_current_word_pos
-        
-        # Select the moved word
         self.selection.set_start(ln, new_current_word_pos)
         self.selection.set_end(ln, new_current_word_pos + len(current_word))
         
         self.emit("changed")
     
     def move_line_up_with_text(self):
-        """Move current line up one line (Alt+Up)"""
+        """Move current line or selection up one line (Alt+Up)"""
         ln = self.cursor_line
         
+        # Check if we have a selection
+        if self.selection.has_selection():
+            bounds = self.selection.get_bounds()
+            if bounds and bounds[0] is not None:
+                start_ln, start_col, end_ln, end_col = bounds
+                
+                # Handle multi-line selections - swap entire block with line above
+                if start_ln != end_ln:
+                    # Adjust end_ln if selection ends at the start of a line
+                    effective_end_ln = end_ln
+                    if end_col == 0:
+                        effective_end_ln = end_ln - 1
+                    
+                    # If adjustment makes it a single line selection effectively, but start_ln != end_ln,
+                    # we still treat it as a block swap of the effective lines.
+                    
+                    # Can't move up if first line is at top
+                    if start_ln == 0:
+                        return
+                    
+                    # Get the line above the selection
+                    line_above = self.get_line(start_ln - 1)
+                    
+                    # Get all selected lines
+                    selected_lines = []
+                    for i in range(start_ln, effective_end_ln + 1):
+                        selected_lines.append(self.get_line(i))
+                    
+                    # Move line above to the bottom of selection
+                    if start_ln - 1 in self.inserted_lines:
+                        self.inserted_lines[start_ln - 1] = selected_lines[0]
+                    else:
+                        self.edits[start_ln - 1] = selected_lines[0]
+                    
+                    # Shift all other selected lines up
+                    for i in range(1, len(selected_lines)):
+                        if start_ln - 1 + i in self.inserted_lines:
+                            self.inserted_lines[start_ln - 1 + i] = selected_lines[i]
+                        else:
+                            self.edits[start_ln - 1 + i] = selected_lines[i]
+                    
+                    # Put line_above at the end
+                    if effective_end_ln in self.inserted_lines:
+                        self.inserted_lines[effective_end_ln] = line_above
+                    else:
+                        self.edits[effective_end_ln] = line_above
+                    
+                    # Update selection to new position
+                    # We shift the original bounds up by 1
+                    self.selection.set_start(start_ln - 1, start_col)
+                    self.selection.set_end(end_ln - 1, end_col)
+                    self.cursor_line = start_ln - 1
+                    self.cursor_col = start_col
+                    
+                    self.emit("changed")
+                    return
+                
+                # Single-line selection - move text to previous line
+                # Can't move up if on first line
+                if ln == 0:
+                    return
+                
+                # Get current line and previous line
+                current_line = self.get_line(ln)
+                prev_line = self.get_line(ln - 1)
+                
+                # Extract selected text
+                selected_text = current_line[start_col:end_col]
+                
+                # Remove selection from current line
+                new_current_line = current_line[:start_col] + current_line[end_col:]
+                
+                # Insert selection into previous line at same column position
+                insert_pos = min(start_col, len(prev_line))
+                new_prev_line = prev_line[:insert_pos] + selected_text + prev_line[insert_pos:]
+                
+                # Update both lines
+                if ln - 1 in self.inserted_lines:
+                    self.inserted_lines[ln - 1] = new_prev_line
+                else:
+                    self.edits[ln - 1] = new_prev_line
+                
+                if ln in self.inserted_lines:
+                    self.inserted_lines[ln] = new_current_line
+                else:
+                    self.edits[ln] = new_current_line
+                
+                # Update selection to new position
+                self.selection.set_start(ln - 1, insert_pos)
+                self.selection.set_end(ln - 1, insert_pos + len(selected_text))
+                self.cursor_line = ln - 1
+                self.cursor_col = insert_pos
+                
+                self.emit("changed")
+                return
+        
+        # No selection - swap entire line
         # Check boundary - can't move up if on first line
         if ln == 0:
             return
@@ -1156,16 +1519,102 @@ class VirtualBuffer(GObject.Object):
         self.cursor_line = ln - 1
         self.cursor_col = min(self.cursor_col, len(current_line))
         
-        # Select the entire moved line
-        self.selection.set_start(ln - 1, 0)
-        self.selection.set_end(ln - 1, len(current_line))
+        # Clear selection
+        self.selection.clear()
         
         self.emit("changed")
     
     def move_line_down_with_text(self):
-        """Move current line down one line (Alt+Down)"""
+        """Move current line or selection down one line (Alt+Down)"""
         ln = self.cursor_line
         
+        # Check if we have a selection
+        if self.selection.has_selection():
+            bounds = self.selection.get_bounds()
+            if bounds and bounds[0] is not None:
+                start_ln, start_col, end_ln, end_col = bounds
+                
+                # Handle multi-line selections - swap entire block with line below
+                if start_ln != end_ln:
+                    # Adjust end_ln if selection ends at the start of a line
+                    effective_end_ln = end_ln
+                    if end_col == 0:
+                        effective_end_ln = end_ln - 1
+                        
+                    # Can't move down if last selected line is at bottom
+                    if effective_end_ln >= self.total() - 1:
+                        return
+                    
+                    # Get the line below the selection
+                    line_below = self.get_line(effective_end_ln + 1)
+                    
+                    # Get all selected lines
+                    selected_lines = []
+                    for i in range(start_ln, effective_end_ln + 1):
+                        selected_lines.append(self.get_line(i))
+                    
+                    # Put line_below at the start (where first selected line was)
+                    if start_ln in self.inserted_lines:
+                        self.inserted_lines[start_ln] = line_below
+                    else:
+                        self.edits[start_ln] = line_below
+                    
+                    # Put all selected lines after line_below
+                    for i in range(len(selected_lines)):
+                        if start_ln + 1 + i in self.inserted_lines:
+                            self.inserted_lines[start_ln + 1 + i] = selected_lines[i]
+                        else:
+                            self.edits[start_ln + 1 + i] = selected_lines[i]
+                    
+                    # Update selection to new position (shifted down by 1)
+                    self.selection.set_start(start_ln + 1, start_col)
+                    self.selection.set_end(end_ln + 1, end_col)
+                    self.cursor_line = start_ln + 1
+                    self.cursor_col = start_col
+                    
+                    self.emit("changed")
+                    return
+                
+                # Single-line selection - move text to next line
+                # Can't move down if on last line
+                if ln >= self.total() - 1:
+                    return
+                
+                # Get current line and next line
+                current_line = self.get_line(ln)
+                next_line = self.get_line(ln + 1)
+                
+                # Extract selected text
+                selected_text = current_line[start_col:end_col]
+                
+                # Remove selection from current line
+                new_current_line = current_line[:start_col] + current_line[end_col:]
+                
+                # Insert selection into next line at same column position
+                insert_pos = min(start_col, len(next_line))
+                new_next_line = next_line[:insert_pos] + selected_text + next_line[insert_pos:]
+                
+                # Update both lines
+                if ln in self.inserted_lines:
+                    self.inserted_lines[ln] = new_current_line
+                else:
+                    self.edits[ln] = new_current_line
+                
+                if ln + 1 in self.inserted_lines:
+                    self.inserted_lines[ln + 1] = new_next_line
+                else:
+                    self.edits[ln + 1] = new_next_line
+                
+                # Update selection to new position
+                self.selection.set_start(ln + 1, insert_pos)
+                self.selection.set_end(ln + 1, insert_pos + len(selected_text))
+                self.cursor_line = ln + 1
+                self.cursor_col = insert_pos
+                
+                self.emit("changed")
+                return
+        
+        # No selection - swap entire line
         # Check boundary - can't move down if on last line
         if ln >= self.total() - 1:
             return
@@ -1189,9 +1638,8 @@ class VirtualBuffer(GObject.Object):
         self.cursor_line = ln + 1
         self.cursor_col = min(self.cursor_col, len(current_line))
         
-        # Select the entire moved line
-        self.selection.set_start(ln + 1, 0)
-        self.selection.set_end(ln + 1, len(current_line))
+        # Clear selection
+        self.selection.clear()
         
         self.emit("changed")
 

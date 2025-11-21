@@ -1,0 +1,34 @@
+Starting test
+Starting test
+Initial: 3='o', 4='t'
+Initial: 3='o', 4='t'
+
+--- Move Left 1 ---
+
+--- Move Left 1 ---
+Moved. 2='o', 3='t', 4=''
+Moved. 2='o', 3='t', 4=''
+
+--- Move Left 2 ---
+
+--- Move Left 2 ---
+Moved. 2='t', 3='', 4=''
+Moved. 2='t', 3='', 4=''
+
+--- Move Left 3 ---
+
+--- Move Left 3 ---
+Moved. 2='', 3='', 4=''
+Moved. 2='', 3='', 4=''
+
+--- Move Left 4 ---
+
+--- Move Left 4 ---
+STUCK! Buffer did not change.
+STUCK! Buffer did not change.
+
+--- Move Left 5 ---
+
+--- Move Left 5 ---
+STUCK! Buffer did not change.
+STUCK! Buffer did not change.
