@@ -994,6 +994,208 @@ class VirtualBuffer(GObject.Object):
         self.selection.clear()
         self.emit("changed")
         
+    def move_word_left_with_text(self):
+        """Move current word left by swapping with previous word (Alt+Left)"""
+        ln = self.cursor_line
+        col = self.cursor_col
+        line = self.get_line(ln)
+        
+        if not line:
+            return
+        
+        def is_word_separator(ch):
+            """Check if character is a word separator (space, underscore, or punctuation)"""
+            return ch in ' _' or not ch.isalnum()
+        
+        # Find current word boundaries (separated by space, underscore, or punctuation)
+        # Find start of current word
+        word_start = col
+        while word_start > 0 and not is_word_separator(line[word_start - 1]):
+            word_start -= 1
+        
+        # Find end of current word
+        word_end = col
+        while word_end < len(line) and not is_word_separator(line[word_end]):
+            word_end += 1
+        
+        # Check if we're at the beginning
+        if word_start == 0:
+            return  # Can't move left
+        
+        # Find previous word boundaries
+        # Skip separators before current word
+        prev_word_end = word_start - 1
+        while prev_word_end > 0 and is_word_separator(line[prev_word_end]):
+            prev_word_end -= 1
+        prev_word_end += 1  # Point to position after last char of prev word
+        
+        if prev_word_end == 0:
+            return  # No previous word
+        
+        # Find start of previous word
+        prev_word_start = prev_word_end - 1
+        while prev_word_start > 0 and not is_word_separator(line[prev_word_start - 1]):
+            prev_word_start -= 1
+        
+        # Extract words (alphanumeric only)
+        current_word = line[word_start:word_end]
+        prev_word = line[prev_word_start:prev_word_end]
+        
+        # Rebuild line with swapped words (keeping separators in place)
+        new_line = (line[:prev_word_start] + 
+                   current_word + 
+                   line[prev_word_end:word_start] +  # separators between words
+                   prev_word + 
+                   line[word_end:])
+        
+        # Update line
+        if ln in self.inserted_lines:
+            self.inserted_lines[ln] = new_line
+        else:
+            self.edits[ln] = new_line
+        
+        # Move cursor to the moved word
+        self.cursor_col = prev_word_start
+        
+        # Select the moved word
+        self.selection.set_start(ln, prev_word_start)
+        self.selection.set_end(ln, prev_word_start + len(current_word))
+        
+        self.emit("changed")
+    
+    def move_word_right_with_text(self):
+        """Move current word right by swapping with next word (Alt+Right)"""
+        ln = self.cursor_line
+        col = self.cursor_col
+        line = self.get_line(ln)
+        
+        if not line:
+            return
+        
+        def is_word_separator(ch):
+            """Check if character is a word separator (space, underscore, or punctuation)"""
+            return ch in ' _' or not ch.isalnum()
+        
+        # Find current word boundaries (separated by space, underscore, or punctuation)
+        # Find start of current word
+        word_start = col
+        while word_start > 0 and not is_word_separator(line[word_start - 1]):
+            word_start -= 1
+        
+        # Find end of current word
+        word_end = col
+        while word_end < len(line) and not is_word_separator(line[word_end]):
+            word_end += 1
+        
+        # Skip separators after current word to find next word
+        next_word_start = word_end
+        while next_word_start < len(line) and is_word_separator(line[next_word_start]):
+            next_word_start += 1
+        
+        # Check if there's a next word
+        if next_word_start >= len(line):
+            return  # No next word
+        
+        # Find end of next word
+        next_word_end = next_word_start
+        while next_word_end < len(line) and not is_word_separator(line[next_word_end]):
+            next_word_end += 1
+        
+        # Extract words (alphanumeric only)
+        current_word = line[word_start:word_end]
+        next_word = line[next_word_start:next_word_end]
+        
+        # Rebuild line with swapped words (keeping separators in place)
+        new_line = (line[:word_start] + 
+                   next_word + 
+                   line[word_end:next_word_start] +  # separators between words
+                   current_word + 
+                   line[next_word_end:])
+        
+        # Update line
+        if ln in self.inserted_lines:
+            self.inserted_lines[ln] = new_line
+        else:
+            self.edits[ln] = new_line
+        
+        # Move cursor to the moved word's new position
+        # After swap: word_start has next_word, then separators, then current_word
+        new_current_word_pos = word_start + len(next_word) + (next_word_start - word_end)
+        self.cursor_col = new_current_word_pos
+        
+        # Select the moved word
+        self.selection.set_start(ln, new_current_word_pos)
+        self.selection.set_end(ln, new_current_word_pos + len(current_word))
+        
+        self.emit("changed")
+    
+    def move_line_up_with_text(self):
+        """Move current line up one line (Alt+Up)"""
+        ln = self.cursor_line
+        
+        # Check boundary - can't move up if on first line
+        if ln == 0:
+            return
+        
+        # Get current and previous line
+        current_line = self.get_line(ln)
+        prev_line = self.get_line(ln - 1)
+        
+        # Swap lines
+        if ln - 1 in self.inserted_lines:
+            self.inserted_lines[ln - 1] = current_line
+        else:
+            self.edits[ln - 1] = current_line
+        
+        if ln in self.inserted_lines:
+            self.inserted_lines[ln] = prev_line
+        else:
+            self.edits[ln] = prev_line
+        
+        # Move cursor to new line position
+        self.cursor_line = ln - 1
+        self.cursor_col = min(self.cursor_col, len(current_line))
+        
+        # Select the entire moved line
+        self.selection.set_start(ln - 1, 0)
+        self.selection.set_end(ln - 1, len(current_line))
+        
+        self.emit("changed")
+    
+    def move_line_down_with_text(self):
+        """Move current line down one line (Alt+Down)"""
+        ln = self.cursor_line
+        
+        # Check boundary - can't move down if on last line
+        if ln >= self.total() - 1:
+            return
+        
+        # Get current and next line
+        current_line = self.get_line(ln)
+        next_line = self.get_line(ln + 1)
+        
+        # Swap lines
+        if ln in self.inserted_lines:
+            self.inserted_lines[ln] = next_line
+        else:
+            self.edits[ln] = next_line
+        
+        if ln + 1 in self.inserted_lines:
+            self.inserted_lines[ln + 1] = current_line
+        else:
+            self.edits[ln + 1] = current_line
+        
+        # Move cursor to new line position
+        self.cursor_line = ln + 1
+        self.cursor_col = min(self.cursor_col, len(current_line))
+        
+        # Select the entire moved line
+        self.selection.set_start(ln + 1, 0)
+        self.selection.set_end(ln + 1, len(current_line))
+        
+        self.emit("changed")
+
+
 
 
 # ============================================================
@@ -2128,9 +2330,37 @@ class VirtualTextView(Gtk.DrawingArea):
         if event and self.im.filter_keypress(event):
             return True
 
+
         name = Gdk.keyval_name(keyval)
         shift_pressed = (state & Gdk.ModifierType.SHIFT_MASK) != 0
         ctrl_pressed = (state & Gdk.ModifierType.CONTROL_MASK) != 0
+        alt_pressed = (state & Gdk.ModifierType.ALT_MASK) != 0
+
+        # Alt+Arrow keys for text movement
+        if alt_pressed and name == "Left":
+            self.buf.move_word_left_with_text()
+            self.keep_cursor_visible()
+            self.update_im_cursor_location()
+            self.queue_draw()
+            return True
+        elif alt_pressed and name == "Right":
+            self.buf.move_word_right_with_text()
+            self.keep_cursor_visible()
+            self.update_im_cursor_location()
+            self.queue_draw()
+            return True
+        elif alt_pressed and name == "Up":
+            self.buf.move_line_up_with_text()
+            self.keep_cursor_visible()
+            self.update_im_cursor_location()
+            self.queue_draw()
+            return True
+        elif alt_pressed and name == "Down":
+            self.buf.move_line_down_with_text()
+            self.keep_cursor_visible()
+            self.update_im_cursor_location()
+            self.queue_draw()
+            return True
 
         # Ctrl+A - Select All
         if ctrl_pressed and name == "a":
