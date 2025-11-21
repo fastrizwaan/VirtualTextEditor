@@ -2353,6 +2353,12 @@ class VirtualTextView(Gtk.DrawingArea):
         drag.connect("drag-end", self.on_drag_end)
         self.add_controller(drag)
         
+        # Middle-click paste
+        middle_click = Gtk.GestureClick()
+        middle_click.set_button(2)  # Middle mouse button
+        middle_click.connect("pressed", self.on_middle_click)
+        self.add_controller(middle_click)
+        
         # Right-click menu
         right_click = Gtk.GestureClick()
         right_click.set_button(3)  # Right mouse button
@@ -2386,6 +2392,40 @@ class VirtualTextView(Gtk.DrawingArea):
         
         # Track if a drag might start (deferred until movement)
         self._drag_pending = False
+
+    def on_middle_click(self, gesture, n_press, x, y):
+        """Paste from primary clipboard on middle-click"""
+        self.grab_focus()
+        
+        # Get click position
+        ln, col = self.xy_to_line_col(x, y)
+        
+        # Move cursor to click position
+        self.buf.set_cursor(ln, col)
+        
+        # Paste from PRIMARY clipboard (not CLIPBOARD)
+        display = self.get_display()
+        clipboard = display.get_primary_clipboard()
+        clipboard.read_text_async(None, self.on_primary_paste_ready)
+        
+        self.queue_draw()
+
+    def on_primary_paste_ready(self, clipboard, result):
+        """Callback when primary clipboard text is ready"""
+        try:
+            text = clipboard.read_text_finish(result)
+            if text:
+                # Delete selection if any
+                if self.buf.selection.has_selection():
+                    self.buf.delete_selection()
+                
+                # Insert text at cursor
+                self.buf.insert_text(text)
+                self.keep_cursor_visible()
+                self.update_im_cursor_location()
+                self.queue_draw()
+        except Exception as e:
+            print(f"Primary paste error: {e}")
 
     def on_right_click(self, gesture, n_press, x, y):
         """Show context menu on right-click"""
@@ -2728,7 +2768,7 @@ class VirtualTextView(Gtk.DrawingArea):
             self.buf.selection.set_end(ln, col)
             self.buf.set_cursor(ln, col, extend_selection=True)
         else:
-            # Normal click - clear selection and move cursor
+        # Normal click - clear selection and move cursor
             self.ctrl.click(ln, col)
         
         self.queue_draw()
@@ -2736,6 +2776,8 @@ class VirtualTextView(Gtk.DrawingArea):
     def on_release(self, g, n, x, y):
         """Handle mouse button release"""
         self.ctrl.end_drag()
+
+
 
     def on_drag_begin(self, g, x, y):
         ln, col = self.xy_to_line_col(x, y)
@@ -3028,6 +3070,34 @@ class VirtualTextView(Gtk.DrawingArea):
         else:
             # Normal drag end
             self.ctrl.end_drag()
+            
+            # Copy selection to PRIMARY clipboard for middle-click paste
+            if self.buf.selection.has_selection():
+                start_ln, start_col, end_ln, end_col = self.buf.selection.get_bounds()
+                
+                # Extract selected text
+                if start_ln == end_ln:
+                    # Single line selection
+                    line = self.buf.get_line(start_ln)
+                    selected_text = line[start_col:end_col]
+                else:
+                    # Multi-line selection
+                    lines = []
+                    for ln in range(start_ln, end_ln + 1):
+                        line = self.buf.get_line(ln)
+                        if ln == start_ln:
+                            lines.append(line[start_col:])
+                        elif ln == end_ln:
+                            lines.append(line[:end_col])
+                        else:
+                            lines.append(line)
+                    selected_text = '\n'.join(lines)
+                
+                # Copy to PRIMARY clipboard
+                if selected_text:
+                    display = self.get_display()
+                    clipboard = display.get_primary_clipboard()
+                    clipboard.set(selected_text)
         
         # Clear word selection mode
         self.word_selection_mode = False
