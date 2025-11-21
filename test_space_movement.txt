@@ -1,0 +1,6 @@
+word1 word2 word3
+trailing spaces   
+  leading spaces
+word1    multiple    spaces
+end space 
+next line text
