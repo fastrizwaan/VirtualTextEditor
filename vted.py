@@ -3984,6 +3984,30 @@ class VirtualTextView(Gtk.DrawingArea):
                 return
         
         # Normal drag behavior
+    
+        # Check for Shift key (Extend Selection Drag)
+        mods = g.get_current_event_state()
+        shift_pressed = (mods & Gdk.ModifierType.SHIFT_MASK) != 0
+        
+        if shift_pressed:
+            # Shift+Drag: Extend selection
+            self.drag_and_drop_mode = False
+            self._drag_pending = False
+            self._pending_click = False
+            
+            # Manually set dragging state to allow update_drag to work
+            # But DO NOT call ctrl.start_drag() because that clears the selection!
+            self.ctrl.dragging = True
+            self.ctrl.drag_start_line = ln
+            self.ctrl.drag_start_col = col
+            
+            # Ensure we are NOT in word selection mode unless we were already
+            if self.click_count <= 1:
+                self.word_selection_mode = False
+                
+            self.queue_draw()
+            return
+
         self.drag_and_drop_mode = False
         self._drag_pending = False
         self._pending_click = False  # We are dragging, so cancel pending click
