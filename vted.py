@@ -4448,6 +4448,9 @@ class EditorWindow(Adw.ApplicationWindow):
         super().__init__(application=app)
         self.set_title("Virtual Text Editor")
         self.set_default_size(320, 240)
+        
+        # Track current encoding
+        self.current_encoding = "utf-8"
 
         self.buf = VirtualBuffer()
         self.view = VirtualTextView(self.buf)
@@ -4475,6 +4478,15 @@ class EditorWindow(Adw.ApplicationWindow):
         open_btn = Gtk.Button(label="Open")
         open_btn.connect("clicked", self.open_file)
         header.pack_start(open_btn)
+        
+        # Add menu button
+        menu_button = Gtk.MenuButton()
+        menu_button.set_icon_name("open-menu-symbolic")
+        menu_button.set_menu_model(self.create_menu())
+        header.pack_end(menu_button)
+        
+        # Setup actions
+        self.setup_actions()
 
         # Clean GTK4 layout: scrollbars OUTSIDE the text viewport
         grid = Gtk.Grid()
@@ -4502,6 +4514,89 @@ class EditorWindow(Adw.ApplicationWindow):
         grid.set_css_classes(["editor-surface"])
         # Put grid into main window
         layout.set_content(grid)
+    
+    def create_menu(self):
+        """Create the application menu"""
+        menu = Gio.Menu()
+        
+        # File section
+        file_section = Gio.Menu()
+        file_section.append("Save As...", "win.save-as")
+        menu.append_section("File", file_section)
+        
+        # Encoding section with submenu
+        encoding_submenu = Gio.Menu()
+        encoding_submenu.append("UTF-8", "win.encoding::utf-8")
+        encoding_submenu.append("UTF-8 with BOM", "win.encoding::utf-8-sig")
+        encoding_submenu.append("UTF-16 LE", "win.encoding::utf-16le")
+        encoding_submenu.append("UTF-16 BE", "win.encoding::utf-16be")
+        
+        encoding_section = Gio.Menu()
+        encoding_section.append_submenu("Encoding", encoding_submenu)
+        menu.append_section(None, encoding_section)
+        
+        return menu
+    
+    def setup_actions(self):
+        """Setup window actions for menu items"""
+        # Save As action
+        save_as_action = Gio.SimpleAction.new("save-as", None)
+        save_as_action.connect("activate", self.on_save_as)
+        self.add_action(save_as_action)
+        
+        # Encoding action with parameter
+        encoding_action = Gio.SimpleAction.new_stateful(
+            "encoding",
+            GLib.VariantType.new("s"),
+            GLib.Variant.new_string(self.current_encoding)
+        )
+        encoding_action.connect("activate", self.on_encoding_changed)
+        self.add_action(encoding_action)
+    
+    def on_save_as(self, action, parameter):
+        """Handle Save As menu action"""
+        dialog = Gtk.FileDialog()
+        dialog.set_title("Save As")
+        
+        def done(dialog, result):
+            try:
+                f = dialog.save_finish(result)
+            except:
+                return
+            path = f.get_path()
+            self.save_file(path)
+        
+        dialog.save(self, None, done)
+    
+    def save_file(self, path):
+        """Save the current buffer to a file with the current encoding"""
+        try:
+            total_lines = self.buf.total()
+            lines = []
+            for i in range(total_lines):
+                lines.append(self.buf.get_line(i))
+            
+            content = "\n".join(lines)
+            
+            # Write with current encoding
+            with open(path, "w", encoding=self.current_encoding) as f:
+                f.write(content)
+            
+            self.set_title(os.path.basename(path))
+            print(f"File saved as {path} with encoding {self.current_encoding}")
+        except Exception as e:
+            print(f"Error saving file: {e}")
+    
+    def on_encoding_changed(self, action, parameter):
+        """Handle encoding selection from menu"""
+        encoding = parameter.get_string()
+        self.current_encoding = encoding
+        action.set_state(parameter)
+        
+        print(f"Encoding changed to: {encoding} (will be used for next save)")
+        # Note: We don't change self.buf.file.encoding because that would
+        # re-decode the file with the wrong encoding, showing garbage.
+        # The encoding change only affects how the file is saved.
 
 
     def on_buffer_changed(self, *_):
@@ -4575,6 +4670,13 @@ class EditorWindow(Adw.ApplicationWindow):
 
                 self.view.scroll_line = 0
                 self.view.scroll_x = 0
+                
+                # Set current encoding to match the loaded file
+                self.current_encoding = idx.encoding
+                # Update the encoding action state
+                encoding_action = self.lookup_action("encoding")
+                if encoding_action:
+                    encoding_action.set_state(GLib.Variant.new_string(self.current_encoding))
                 
                 # Trigger width scan for the new file
                 self.view.file_loaded()
