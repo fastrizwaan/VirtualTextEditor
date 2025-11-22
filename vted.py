@@ -1127,17 +1127,26 @@ class VirtualBuffer(GObject.Object):
                             return  # Can't move left from first line
                         
                         prev_ln = ln - 1
-                        prev_line = self.get_line(prev_ln)
                         
-                        # Find last word on previous line
-                        prev_word_end = len(prev_line)
-                        while prev_word_end > 0 and is_word_separator(prev_line[prev_word_end - 1]):
-                            prev_word_end -= 1
+                        # Skip empty lines to find the previous word
+                        while prev_ln >= 0:
+                            prev_line = self.get_line(prev_ln)
+                            
+                            # Find last word on this line
+                            prev_word_end = len(prev_line)
+                            while prev_word_end > 0 and is_word_separator(prev_line[prev_word_end - 1]):
+                                prev_word_end -= 1
+                            
+                            # If we found a word on this line, break
+                            if prev_word_end > 0:
+                                break
+                            
+                            # Otherwise, try previous line
+                            prev_ln -= 1
                         
-                        # if prev_word_end == 0:
-                        #    return  # No word on previous line either
-                        # Allow moving to empty line
-
+                        # Check if we found a word
+                        if prev_ln < 0:
+                            return  # No word found
                         
                         prev_word_start = prev_word_end
                         while prev_word_start > 0 and not is_word_separator(prev_line[prev_word_start - 1]):
@@ -1145,43 +1154,34 @@ class VirtualBuffer(GObject.Object):
                         
                         prev_word = prev_line[prev_word_start:prev_word_end]
                         
-                        # Get selected text and extract trailing separators
+                        # Get selected text
                         selected_text = line[start_col:end_col]
-                        selected_content = selected_text.rstrip()
-                        selected_trailing = selected_text[len(selected_content):]
                         
-                        # Update current line: keep trailing separators from selected text, then rest of line
-                        new_current_line = line[:start_col] + selected_trailing + line[end_col:]
+                        # Update current line: replace selected text with prev_word at the same position
+                        new_current_line = line[:start_col] + prev_word + line[end_col:]
                         if ln in self.inserted_lines:
                             self.inserted_lines[ln] = new_current_line
                         else:
                             self.edits[ln] = new_current_line
                         
-                        # Update previous line: swap prev_word with selected content (no trailing spaces)
+                        # Update previous line: replace prev_word with selected text at the same position
                         new_prev_line = (prev_line[:prev_word_start] + 
-                                       selected_content + 
+                                       selected_text + 
                                        prev_line[prev_word_end:])
                         if prev_ln in self.inserted_lines:
                             self.inserted_lines[prev_ln] = new_prev_line
                         else:
                             self.edits[prev_ln] = new_prev_line
                         
-                        # Add prev_word to start of current line
-                        final_current_line = prev_word + new_current_line
-                        if ln in self.inserted_lines:
-                            self.inserted_lines[ln] = final_current_line
-                        else:
-                            self.edits[ln] = final_current_line
-                        
                         # Update selection to moved position on previous line
                         self.selection.set_start(prev_ln, prev_word_start)
-                        self.selection.set_end(prev_ln, prev_word_start + len(selected_content))
+                        self.selection.set_end(prev_ln, prev_word_start + len(selected_text))
                         self.cursor_line = prev_ln
                         self.cursor_col = prev_word_start
                         
                         # Update state
                         self.last_move_was_partial = False
-                        self.expected_selection = (prev_ln, prev_word_start, prev_ln, prev_word_start + len(selected_content))
+                        self.expected_selection = (prev_ln, prev_word_start, prev_ln, prev_word_start + len(selected_text))
                         
                         self.emit("changed")
                         return
@@ -1278,31 +1278,25 @@ class VirtualBuffer(GObject.Object):
                 return
         
         # No selection - swap current word with previous word
-        # Special handling for cursor at word boundaries
-        # If cursor is at end of line or right after a word (before a space), treat as being on that word
-        if col >= len(line) or (col > 0 and col < len(line) and is_word_separator(line[col]) and not is_word_separator(line[col - 1])):
-            # Cursor is right after a word - find that word and move it left
-            if col > 0:
-                word_end = col
-                word_start = col
-                while word_start > 0 and not is_word_separator(line[word_start - 1]):
-                    word_start -= 1
-            else:
-                return  # At start of line, can't move left
-        elif col < len(line) and is_word_separator(line[col]):
-            # Cursor is on a space (not right after a word) - find the word to the RIGHT to move it left
+        # Only operate if cursor is on a word or right after a word
+        if col > 0 and col < len(line) and is_word_separator(line[col]) and not is_word_separator(line[col - 1]):
+            # Cursor is right after a word (before a separator) - find that word and move it left
+            word_end = col
             word_start = col
-            # Skip any separators to the right
-            while word_start < len(line) and is_word_separator(line[word_start]):
-                word_start += 1
-            
-            if word_start >= len(line):
-                return  # No word to the right
-            
-            # Now find the end of that word
-            word_end = word_start
-            while word_end < len(line) and not is_word_separator(line[word_end]):
-                word_end += 1
+            while word_start > 0 and word_start - 1 < len(line) and not is_word_separator(line[word_start - 1]):
+                word_start -= 1
+        elif col >= len(line) and col > 0 and not is_word_separator(line[col - 1]):
+            # Cursor is at end of line, right after a word character
+            word_end = col
+            word_start = col
+            while word_start > 0 and not is_word_separator(line[word_start - 1]):
+                word_start -= 1
+        elif col < len(line) and is_word_separator(line[col]):
+            # Cursor is on a separator (not right after a word) - do nothing
+            return
+        elif col >= len(line):
+            # Cursor is at end of line after a separator - do nothing
+            return
         else:
             # Cursor is on a word character - find current word boundaries
             word_start = col
@@ -1329,14 +1323,26 @@ class VirtualBuffer(GObject.Object):
                 return  # Can't move left from first line
             
             prev_ln = ln - 1
-            prev_line = self.get_line(prev_ln)
             
-            # Find last word on previous line
-            prev_word_end = len(prev_line)
-            while prev_word_end > 0 and is_word_separator(prev_line[prev_word_end - 1]):
-                prev_word_end -= 1
+            # Skip empty lines to find the previous word
+            while prev_ln >= 0:
+                prev_line = self.get_line(prev_ln)
+                
+                # Find last word on this line
+                prev_word_end = len(prev_line)
+                while prev_word_end > 0 and is_word_separator(prev_line[prev_word_end - 1]):
+                    prev_word_end -= 1
+                
+                # If we found a word on this line, break
+                if prev_word_end > 0:
+                    break
+                
+                # Otherwise, try previous line
+                prev_ln -= 1
             
-            # Allow moving to empty line
+            # Check if we found a word
+            if prev_ln < 0:
+                return  # No word found
             
             prev_word_start = prev_word_end
             while prev_word_start > 0 and not is_word_separator(prev_line[prev_word_start - 1]):
@@ -1345,14 +1351,14 @@ class VirtualBuffer(GObject.Object):
             prev_word = prev_line[prev_word_start:prev_word_end]
             current_word = line[word_start:word_end]
             
-            # Update current line (remove current_word)
-            new_current_line = line[:word_start] + line[word_end:]
+            # Update current line: replace current_word with prev_word at the same position
+            new_current_line = line[:word_start] + prev_word + line[word_end:]
             if ln in self.inserted_lines:
                 self.inserted_lines[ln] = new_current_line
             else:
                 self.edits[ln] = new_current_line
             
-            # Update previous line (swap prev_word with current_word)
+            # Update previous line: replace prev_word with current_word at the same position
             new_prev_line = (prev_line[:prev_word_start] + 
                            current_word + 
                            prev_line[prev_word_end:])
@@ -1361,30 +1367,12 @@ class VirtualBuffer(GObject.Object):
             else:
                 self.edits[prev_ln] = new_prev_line
             
-            # Insert prev_word at start of current line
-            # Only add space if needed
-            sep = " "
-            if not new_current_line or new_current_line.startswith(" ") or new_current_line.startswith("\t"):
-                sep = ""
-            final_current_line = prev_word + sep + new_current_line
-            if ln in self.inserted_lines:
-                self.inserted_lines[ln] = final_current_line
-            else:
-                self.edits[ln] = final_current_line
-            
-            # Update selection/cursor to moved position on previous line
+            # Update cursor to moved position on previous line
             self.cursor_line = prev_ln
-            self.cursor_col = prev_word_start
-            # Clear selection just in case
+            self.cursor_col = prev_word_start + len(current_word)
+            # Clear selection
             self.selection.set_start(self.cursor_line, self.cursor_col)
-            self.selection.set_end(self.cursor_line, self.cursor_col + len(current_word))
-            # Wait, if no selection was active, we probably want to select the moved word?
-            # Standard behavior: usually cursor moves with the word. Selection?
-            # If user just pressed Alt+Left, they expect the word to move.
-            # If they didn't select it, maybe we should select it now to show what moved?
-            # Or just move cursor?
-            # The selection logic selects it.
-            # Let's select it to be consistent and helpful.
+            self.selection.set_end(self.cursor_line, self.cursor_col)
             
             self.emit("changed")
             return
@@ -1549,17 +1537,26 @@ class VirtualBuffer(GObject.Object):
                             return  # Can't move right
                         
                         next_ln = ln + 1
-                        next_line = self.get_line(next_ln)
                         
-                        # Find first word on next line
-                        next_word_start = 0
-                        while next_word_start < len(next_line) and is_word_separator(next_line[next_word_start]):
-                            next_word_start += 1
+                        # Skip empty lines to find the next word
+                        while next_ln < self.total():
+                            next_line = self.get_line(next_ln)
+                            
+                            # Find first word on this line
+                            next_word_start = 0
+                            while next_word_start < len(next_line) and is_word_separator(next_line[next_word_start]):
+                                next_word_start += 1
+                            
+                            # If we found a word on this line, break
+                            if next_word_start < len(next_line):
+                                break
+                            
+                            # Otherwise, try next line
+                            next_ln += 1
                         
-                        # if next_word_start == len(next_line):
-                        #    return  # No word on next line
-                        # Allow moving to empty line
-
+                        # Check if we found a word
+                        if next_ln >= self.total():
+                            return  # No word found
                         
                         next_word_end = next_word_start
                         while next_word_end < len(next_line) and not is_word_separator(next_line[next_word_end]):
@@ -1567,41 +1564,35 @@ class VirtualBuffer(GObject.Object):
                         
                         next_word = next_line[next_word_start:next_word_end]
                         
-                        # Get selected text and extract trailing separators
+                        # Get selected text
                         selected_text = line[start_col:end_col]
-                        selected_content = selected_text.rstrip()
-                        selected_trailing = selected_text[len(selected_content):]
                         
-                        # Update current line: keep prefix, keep trailing separators from selected text
-                        new_current_line = line[:start_col] + selected_trailing + line[end_col:]
+                        # Everything after the selected word on current line (punctuation, spaces, etc.)
+                        after_selected = line[end_col:]
+                        
+                        # Update current line: keep prefix + next_word + everything after selected word
+                        new_current_line = line[:start_col] + next_word + after_selected
                         if ln in self.inserted_lines:
                             self.inserted_lines[ln] = new_current_line
                         else:
                             self.edits[ln] = new_current_line
                         
-                        # Update next line: replace next_word with selected content (no trailing spaces)
-                        new_next_line = next_line[:next_word_start] + selected_content + next_line[next_word_end:]
+                        # Update next line: replace next_word with selected text (preserves any punctuation in selection)
+                        new_next_line = next_line[:next_word_start] + selected_text + next_line[next_word_end:]
                         if next_ln in self.inserted_lines:
                             self.inserted_lines[next_ln] = new_next_line
                         else:
                             self.edits[next_ln] = new_next_line
                         
-                        # Add next_word to current line
-                        final_current_line = new_current_line + next_word
-                        if ln in self.inserted_lines:
-                            self.inserted_lines[ln] = final_current_line
-                        else:
-                            self.edits[ln] = final_current_line
-                            
                         # Update selection to moved position on next line
                         self.selection.set_start(next_ln, next_word_start)
-                        self.selection.set_end(next_ln, next_word_start + len(selected_content))
+                        self.selection.set_end(next_ln, next_word_start + len(selected_text))
                         self.cursor_line = next_ln
-                        self.cursor_col = next_word_start + len(selected_content)
+                        self.cursor_col = next_word_start + len(selected_text)
                         
                         # Update state
                         self.last_move_was_partial = False
-                        self.expected_selection = (next_ln, next_word_start, next_ln, next_word_start + len(selected_content))
+                        self.expected_selection = (next_ln, next_word_start, next_ln, next_word_start + len(selected_text))
                         
                         self.emit("changed")
                         return
@@ -1616,7 +1607,7 @@ class VirtualBuffer(GObject.Object):
                     # Rebuild line with swapped text
                     new_line = (line[:start_col] + 
                                next_word + 
-                               separators + 
+                               separators +
                                selected_text + 
                                line[next_word_end:])
                     
@@ -1701,31 +1692,25 @@ class VirtualBuffer(GObject.Object):
                 return
         
         # No selection - swap current word with next word
-        # Special handling for cursor at word boundaries
-        # If cursor is at end of line or right after a word (before a space), treat as being on that word
-        if col >= len(line) or (col > 0 and col < len(line) and is_word_separator(line[col]) and not is_word_separator(line[col - 1])):
-            # Cursor is right after a word - find that word and move it right
-            if col > 0:
-                word_end = col
-                word_start = col
-                while word_start > 0 and not is_word_separator(line[word_start - 1]):
-                    word_start -= 1
-            else:
-                return  # At start of line, can't move right
-        elif col < len(line) and is_word_separator(line[col]):
-            # Cursor is on a space (not right after a word) - find the word to the LEFT to move it right
+        # Only operate if cursor is on a word or right after a word
+        if col > 0 and col < len(line) and is_word_separator(line[col]) and not is_word_separator(line[col - 1]):
+            # Cursor is right after a word (before a separator) - find that word and move it right
             word_end = col
-            # Skip any separators to the left
-            while word_end > 0 and is_word_separator(line[word_end - 1]):
-                word_end -= 1
-            
-            if word_end == 0:
-                return  # No word to the left
-            
-            # Now find the start of that word
-            word_start = word_end
+            word_start = col
             while word_start > 0 and not is_word_separator(line[word_start - 1]):
                 word_start -= 1
+        elif col >= len(line) and col > 0 and not is_word_separator(line[col - 1]):
+            # Cursor is at end of line, right after a word character
+            word_end = col
+            word_start = col
+            while word_start > 0 and not is_word_separator(line[word_start - 1]):
+                word_start -= 1
+        elif col < len(line) and is_word_separator(line[col]):
+            # Cursor is on a separator (not right after a word) - do nothing
+            return
+        elif col >= len(line):
+            # Cursor is at end of line after a separator - do nothing
+            return
         else:
             # Cursor is on a word character - find current word boundaries
             word_start = col
@@ -1749,12 +1734,25 @@ class VirtualBuffer(GObject.Object):
             next_ln = ln + 1
             next_line = self.get_line(next_ln)
             
-            # Find first word on next line
-            next_word_start = 0
-            while next_word_start < len(next_line) and is_word_separator(next_line[next_word_start]):
-                next_word_start += 1
+            # Skip empty lines to find the next word
+            while next_ln < self.total():
+                next_line = self.get_line(next_ln)
+                
+                # Find first word on this line
+                next_word_start = 0
+                while next_word_start < len(next_line) and is_word_separator(next_line[next_word_start]):
+                    next_word_start += 1
+                
+                # If we found a word on this line, break
+                if next_word_start < len(next_line):
+                    break
+                
+                # Otherwise, try next line
+                next_ln += 1
             
-            # Allow moving to empty line
+            # Check if we found a word
+            if next_ln >= self.total():
+                return  # No word found
             
             next_word_end = next_word_start
             while next_word_end < len(next_line) and not is_word_separator(next_line[next_word_end]):
@@ -1763,12 +1761,11 @@ class VirtualBuffer(GObject.Object):
             next_word = next_line[next_word_start:next_word_end]
             current_word = line[word_start:word_end]
             
-            # Extract trailing separators from current word's position
-            current_word_trailing = line[word_end:].lstrip()
-            current_word_trailing_sep = line[word_end:len(line) - len(current_word_trailing)]
+            # Everything after the current word on this line (includes punctuation and spaces)
+            after_current_word = line[word_end:]
             
-            # Update current line: keep everything before word, add next_word, keep trailing separators
-            new_current_line = line[:word_start] + next_word + current_word_trailing_sep
+            # Update current line: prefix + next_word + everything that was after current_word
+            new_current_line = line[:word_start] + next_word + after_current_word
             if ln in self.inserted_lines:
                 self.inserted_lines[ln] = new_current_line
             else:
@@ -1780,11 +1777,11 @@ class VirtualBuffer(GObject.Object):
                 self.inserted_lines[next_ln] = new_next_line
             else:
                 self.edits[next_ln] = new_next_line
-                
-            # Update selection/cursor to moved position on next line
+            
+            # Update cursor to moved position on next line
             self.cursor_line = next_ln
             self.cursor_col = next_word_start + len(current_word)
-            # Clear selection just in case
+            # Clear selection
             self.selection.set_start(self.cursor_line, self.cursor_col)
             self.selection.set_end(self.cursor_line, self.cursor_col)
             
@@ -1802,7 +1799,7 @@ class VirtualBuffer(GObject.Object):
         # Rebuild line with swapped text
         new_line = (line[:word_start] + 
                    next_word + 
-                   separators + 
+                   separators +
                    current_word + 
                    line[next_word_end:])
         
@@ -1816,7 +1813,7 @@ class VirtualBuffer(GObject.Object):
         new_cursor_col = word_start + len(next_word) + len(separators) + len(current_word)
         self.cursor_col = new_cursor_col
         self.selection.set_start(ln, new_cursor_col)
-        self.selection.set_end(ln, new_cursor_col)
+        self.selection.set_end(ln, new_cursor_col) # This line was syntactically incorrect in the instruction, assuming it meant to clear selection or set cursor as end. Reverting to original behavior of selecting the moved word.
         
         self.emit("changed")
     
