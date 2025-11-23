@@ -4649,8 +4649,8 @@ class EditorPage(Gtk.Grid):
 
     def get_title(self):
         if self.path:
-            return os.path.basename(self.path)
-        return "Untitled Document 3"
+            return os.path.basename(self.path) + "      "
+        return "Untitled Document      "
 
 # Global variable to track dragged tab (bypassing GObject marshalling issues)
 DRAGGED_TAB = None
