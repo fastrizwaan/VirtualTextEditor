@@ -70,12 +70,16 @@ CSS_OVERLAY_SCROLLBAR = """
    ======================== */
 
 .chrome-tab {
-    margin: 0;
-    padding: 6px;
-    min-height: 24px;
+    margin-left: 1px;
+    margin-bottom:1px;
+    padding-left: 12px;
+    padding-right: 8px;
+    padding-top:4px;
+    padding-bottom:4px;
 
+    min-height: 24px;
     background: transparent;
-    color: #d0d0d0;
+    color: #B0B0B0;
     min-height: 24px;
     border-radius: 8px;
 
@@ -85,8 +89,12 @@ CSS_OVERLAY_SCROLLBAR = """
 .chrome-tab:hover {
     color: #ffffff;
     min-height: 24px;
-     background: rgba(255,255,255,0.12);
-    padding: 6px;    
+    background: rgba(255,255,255,0.06);
+    padding-left: 12px;
+    padding-right: 8px;
+    padding-top:4px;
+    padding-bottom:4px;
+
 }
 
 /* ACTIVE TAB (pilled) */
@@ -94,8 +102,10 @@ CSS_OVERLAY_SCROLLBAR = """
     background: rgba(255,255,255,0.12);
     color: white;
     min-height: 24px;
-    padding: 6px;
-
+    padding-left: 12px;
+    padding-right: 8px;
+    padding-top:4px;
+    padding-bottom:4px;
     border-radius: 10px;
 }
 
@@ -106,14 +116,14 @@ CSS_OVERLAY_SCROLLBAR = """
 
 /* close button */
 .chrome-tab button {
-    min-width: 16px;
-    min-height: 16px;
-    padding: 0;
-    opacity: 0.25;
+    min-width: 10px;
+    min-height: 10px;
+    padding: 3px;
+    opacity: 0.10;
     background: none;
     border: none;
     box-shadow: none;
-    color: #e2e2e2;
+    color: #FFFFFF;
 }
 
 .chrome-tab:hover button,
@@ -126,9 +136,9 @@ CSS_OVERLAY_SCROLLBAR = """
    ======================== */
 .chrome-tab-separator {
     min-width: 1px;
-    background-color: rgba(255,255,255,0.14);
-    margin-top: 10px;
-    margin-bottom: 10px;
+    background-color: rgba(255,255,255,0.15);
+    margin-top: 6px;
+    margin-bottom: 6px;
 }
 
 .chrome-tab-separator.hidden {
@@ -143,6 +153,26 @@ CSS_OVERLAY_SCROLLBAR = """
 .chrome-tab-separator:last-child {
     background-color: transparent;
     min-width: 0;
+}
+/* ========================
+   Tab Bar
+   ======================== */
+.chrome-tab-bar {
+    background-color: @headerbar_bg_color;
+    padding: 0;
+    margin: 0;
+}
+.chrome-tab-close-button {
+    opacity: 0;
+    transition: opacity 300ms ease, background-color 300ms ease;
+}
+
+.chrome-tab:hover .chrome-tab-close-button {
+    opacity: 1;
+}
+
+.chrome-tab-close-button:hover {
+    background-color: rgba(255, 255, 255, 0.1);
 }
 
 
@@ -4595,7 +4625,7 @@ class EditorPage(Gtk.Grid):
     def get_title(self):
         if self.path:
             return os.path.basename(self.path)
-        return "Untitled"
+        return "Untitled Document 3"
 
 class ChromeTab(Gtk.Box):
     """A custom tab widget that behaves like Chrome tabs"""
@@ -4612,14 +4642,16 @@ class ChromeTab(Gtk.Box):
         self.add_css_class("chrome-tab")
        
         # Tab content container
-        content_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10 )
-       
+        content_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0 )
+
         # Title label
         self.label = Gtk.Label()
         self.label.set_text(title)
-        self.label.set_ellipsize(Pango.EllipsizeMode.END)
+        self.label.set_max_width_chars(30)
+        self.label.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
         self.label.set_single_line_mode(True)
-        self.label.set_hexpand(False)
+        self.label.set_hexpand(True)
+        #self.label.set_halign(Gtk.Align.END)
         content_box.append(self.label)
        
         # Close button
@@ -4628,7 +4660,9 @@ class ChromeTab(Gtk.Box):
             self.close_button.set_icon_name("window-close-symbolic")
             self.close_button.add_css_class("flat")
             self.close_button.add_css_class("circular")
-            self.close_button.set_size_request(20, 20)
+            #self.close_button.set_halign(Gtk.Align.CENTER)
+            self.close_button.add_css_class("chrome-tab-close-button")
+            self.close_button.set_size_request(16, 16)
             self.close_button.connect('clicked', self._on_close_clicked)
             content_box.append(self.close_button)
        
@@ -4680,8 +4714,9 @@ class ChromeTabBar(Adw.WrapBox):
     def __init__(self):
         super().__init__(orientation=Gtk.Orientation.HORIZONTAL)
 
+        self.set_margin_start(4)
         self.set_child_spacing(0)
-        self.add_css_class("chrome-tab-bar")
+        #self.add_css_class("chrome-tab-bar")
 
         self.tabs = []
         self.separators = []   # separator BEFORE each tab + 1 final separator
@@ -4838,12 +4873,12 @@ class EditorWindow(Adw.ApplicationWindow):
         self.set_title("Virtual Text Editor")
         self.set_default_size(800, 600)
 
-        # Main layout container
-        main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        # Create ToolbarView
+        toolbar_view = Adw.ToolbarView()
         
         # Header Bar
         header = Adw.HeaderBar()
-        main_box.append(header)
+        toolbar_view.add_top_bar(header)
 
         # Toolbar / Actions
         open_btn = Gtk.Button(label="Open")
@@ -4862,18 +4897,17 @@ class EditorWindow(Adw.ApplicationWindow):
         menu_button.set_menu_model(self.create_menu())
         header.pack_end(menu_button)
         
-        # Tab List (ChromeTabBar)
+        # Tab List (ChromeTabBar) as a top bar
         self.tab_bar = ChromeTabBar()
-        self.tab_bar.set_margin_start(6)
-        main_box.append(self.tab_bar)
+        toolbar_view.add_top_bar(self.tab_bar)
 
         # Tab View (Content)
         self.tab_view = Adw.TabView()
         self.tab_view.set_vexpand(True)
         self.tab_view.set_hexpand(True)
-        main_box.append(self.tab_view)
+        toolbar_view.set_content(self.tab_view)
 
-        self.set_content(main_box)
+        self.set_content(toolbar_view)
         
         # Setup actions
         self.setup_actions()
