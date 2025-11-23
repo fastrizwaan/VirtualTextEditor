@@ -79,7 +79,7 @@ CSS_OVERLAY_SCROLLBAR = """
 
     min-height: 24px;
     background: transparent;
-    color: #B0B0B0;
+    color: #FF00a0;
     min-height: 24px;
     border-radius: 8px;
 
@@ -4671,7 +4671,7 @@ class ChromeTab(Gtk.Box):
        
         # Create overlay for label and close button
         overlay = Gtk.Overlay()
-        
+
         # Title label (uses full width)
         self.label = Gtk.Label()
         self.label.set_text(title)
@@ -5211,8 +5211,9 @@ class EditorWindow(Adw.ApplicationWindow):
         self.add_controller(key_ctrl)
 
     def on_window_key_pressed(self, controller, keyval, keycode, state):
-        # Ctrl+Tab / Ctrl+Shift+Tab
+        # Ctrl+Tab / Ctrl+Shift+Tab / Ctrl+T / Ctrl+O / Ctrl+Shift+S
         if state & Gdk.ModifierType.CONTROL_MASK:
+            # Tab switching
             if keyval == Gdk.KEY_Tab or keyval == Gdk.KEY_ISO_Left_Tab:
                 direction = 1
                 if (state & Gdk.ModifierType.SHIFT_MASK) or keyval == Gdk.KEY_ISO_Left_Tab:
@@ -5227,6 +5228,29 @@ class EditorWindow(Adw.ApplicationWindow):
                     new_page = self.tab_view.get_nth_page(new_idx)
                     self.tab_view.set_selected_page(new_page)
                     return True
+            
+            # Ctrl+T: New Tab
+            elif keyval == Gdk.KEY_t or keyval == Gdk.KEY_T:
+                self.on_new_tab(None)
+                return True
+                
+            # Ctrl+O: Open File
+            elif keyval == Gdk.KEY_o or keyval == Gdk.KEY_O:
+                self.open_file(None)
+                return True
+                
+            # Ctrl+Shift+S: Save As
+            elif (keyval == Gdk.KEY_s or keyval == Gdk.KEY_S) and (state & Gdk.ModifierType.SHIFT_MASK):
+                self.on_save_as(None, None)
+                return True
+            
+            # Ctrl+W: Close Tab
+            elif keyval == Gdk.KEY_w or keyval == Gdk.KEY_W:
+                page = self.tab_view.get_selected_page()
+                if page:
+                    self.close_tab(page)
+                return True
+                
         return False
 
     def get_current_page(self):
