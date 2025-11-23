@@ -11,13 +11,14 @@ gi.require_version("Gdk", "4.0")
 from gi.repository import Gtk, Adw, Gdk, GObject, Pango, PangoCairo, GLib, Gio
 
 CSS_OVERLAY_SCROLLBAR = """
-/* Vertical container */
+/* ========================
+   Scrollbars (unchanged)
+   ======================== */
 .overlay-scrollbar {
     background-color: rgb(25,25,25);
     min-width: 2px;
 }
 
-/* Vertical thumb */
 .overlay-scrollbar trough > slider {
     min-width: 2px;
     border-radius: 12px;
@@ -25,24 +26,21 @@ CSS_OVERLAY_SCROLLBAR = """
     transition: min-width 200ms ease, background-color 200ms ease;
 }
 
-/* Hover → wider */
 .overlay-scrollbar trough > slider:hover {
     min-width: 8px;
     background-color: rgba(0,127,255,0.52);
 }
 
-/* Dragging → :active (GTK4-native) */
 .overlay-scrollbar trough > slider:active {
     min-width: 8px;
     background-color: rgba(255,255,255,0.50);
 }
 
-
-/* ---------------- HORIZONTAL ---------------- */
-.hscrollbar-overlay  {
+.hscrollbar-overlay {
     background-color: rgb(25,25,25);
     min-width: 2px;
 }
+
 .hscrollbar-overlay trough > slider {
     min-height: 2px;
     border-radius: 12px;
@@ -55,16 +53,101 @@ CSS_OVERLAY_SCROLLBAR = """
     background-color: rgba(0,127,255,0.52);
 }
 
-/* Dragging (GTK4-native) */
 .hscrollbar-overlay trough > slider:active {
     min-height: 8px;
     background-color: rgba(255,255,255,0.50);
 }
+
+/* ========================
+   Editor background
+   ======================== */
 .editor-surface {
-    background-color: rgb(25,25,25); /* same as your renderer’s bg */
+    background-color: rgb(25,25,25);
 }
 
+/* ========================
+   Chrome Tabs
+   ======================== */
+
+.chrome-tab {
+    margin: 0;
+    padding: 6px;
+    min-height: 24px;
+
+    background: transparent;
+    color: #d0d0d0;
+    min-height: 24px;
+    border-radius: 8px;
+
+    transition: background 140ms ease, color 140ms ease;
+}
+
+.chrome-tab:hover {
+    color: #ffffff;
+    min-height: 24px;
+     background: rgba(255,255,255,0.12);
+    padding: 6px;    
+}
+
+/* ACTIVE TAB (pilled) */
+.chrome-tab.active {
+    background: rgba(255,255,255,0.12);
+    color: white;
+    min-height: 24px;
+    padding: 6px;
+
+    border-radius: 10px;
+}
+
+/* Modified marker */
+.chrome-tab.modified {
+    font-style: italic;
+}
+
+/* close button */
+.chrome-tab button {
+    min-width: 16px;
+    min-height: 16px;
+    padding: 0;
+    opacity: 0.25;
+    background: none;
+    border: none;
+    box-shadow: none;
+    color: #e2e2e2;
+}
+
+.chrome-tab:hover button,
+.chrome-tab.active button {
+    opacity: 1;
+}
+
+/* ========================
+   Separators
+   ======================== */
+.chrome-tab-separator {
+    min-width: 1px;
+    background-color: rgba(255,255,255,0.14);
+    margin-top: 10px;
+    margin-bottom: 10px;
+}
+
+.chrome-tab-separator.hidden {
+    min-width: 0px;
+    background-color: transparent;
+}
+.chrome-tab-separator:first-child {
+    background-color: transparent;
+    min-width: 0;
+}
+
+.chrome-tab-separator:last-child {
+    background-color: transparent;
+    min-width: 0;
+}
+
+
 """
+
 
 
 # ============================================================
@@ -4467,14 +4550,15 @@ class LoadingDialog(Adw.Window):
 #   WINDOW
 # ============================================================
 
-class EditorWindow(Adw.ApplicationWindow):
-    def __init__(self, app):
-        super().__init__(application=app)
-        self.set_title("Virtual Text Editor")
-        self.set_default_size(320, 240)
-        
-        # Track current encoding
+class EditorPage(Gtk.Grid):
+    def __init__(self):
+        super().__init__()
+        self.set_column_spacing(0)
+        self.set_row_spacing(0)
+        self.set_css_classes(["editor-surface"])
+
         self.current_encoding = "utf-8"
+        self.path = None
 
         self.buf = VirtualBuffer()
         self.view = VirtualTextView(self.buf)
@@ -4486,22 +4570,291 @@ class EditorWindow(Adw.ApplicationWindow):
         self.vscroll.set_visible(False)
         self.hscroll.set_visible(False)
 
-
-        # IMPORTANT: give the view references to both scrollbars
         self.view.vscroll = self.vscroll
         self.view.hscroll = self.hscroll
 
-        self.buf.connect("changed", self.on_buffer_changed)
+        self.buf.connect("changed", self.view.on_buffer_changed)
 
-        layout = Adw.ToolbarView()
-        self.set_content(layout)
+        # Attach to grid
+        self.view.set_hexpand(True)
+        self.view.set_vexpand(True)
+        self.attach(self.view, 0, 0, 1, 1)
+        
+        self.vscroll.set_hexpand(False)
+        self.vscroll.set_vexpand(True)
+        self.attach(self.vscroll, 1, 0, 1, 1)
+        
+        self.hscroll.set_hexpand(True)
+        self.hscroll.set_vexpand(False)
+        self.attach(self.hscroll, 0, 1, 1, 1)
+        
+        corner = Gtk.Box()
+        corner.set_size_request(12, 12)
+        self.attach(corner, 1, 1, 1, 1)
 
+    def get_title(self):
+        if self.path:
+            return os.path.basename(self.path)
+        return "Untitled"
+
+class ChromeTab(Gtk.Box):
+    """A custom tab widget that behaves like Chrome tabs"""
+   
+    __gsignals__ = {
+        'close-requested': (GObject.SignalFlags.RUN_FIRST, None, ()),
+        'activate-requested': (GObject.SignalFlags.RUN_FIRST, None, ()),
+    }
+   
+    def __init__(self, title="Untitled", closeable=True):
+        super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        self.set_hexpand(False)
+        self.set_halign(Gtk.Align.START)
+        self.add_css_class("chrome-tab")
+       
+        # Tab content container
+        content_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10 )
+       
+        # Title label
+        self.label = Gtk.Label()
+        self.label.set_text(title)
+        self.label.set_ellipsize(Pango.EllipsizeMode.END)
+        self.label.set_single_line_mode(True)
+        self.label.set_hexpand(False)
+        content_box.append(self.label)
+       
+        # Close button
+        if closeable:
+            self.close_button = Gtk.Button()
+            self.close_button.set_icon_name("window-close-symbolic")
+            self.close_button.add_css_class("flat")
+            self.close_button.add_css_class("circular")
+            self.close_button.set_size_request(20, 20)
+            self.close_button.connect('clicked', self._on_close_clicked)
+            content_box.append(self.close_button)
+       
+        self.append(content_box)
+       
+        # Make the entire tab clickable
+        click_gesture = Gtk.GestureClick()
+        click_gesture.connect('pressed', self._on_tab_clicked)
+        self.add_controller(click_gesture)
+       
+        self._is_active = False
+        self._original_title = title
+       
+    def _on_close_clicked(self, button):
+        self.emit('close-requested')
+       
+    def _on_tab_clicked(self, gesture, n_press, x, y):
+        self.emit('activate-requested')
+       
+    def set_title(self, title):
+        self._original_title = title
+        self.label.set_text(title)
+       
+    def get_title(self):
+        return self._original_title
+       
+    def set_active(self, active):
+        self._is_active = active
+        if active:
+            self.add_css_class("active")
+        else:
+            self.remove_css_class("active")
+           
+    def set_modified(self, modified):
+        if modified:
+            self.label.set_text(f"● {self._original_title}")
+            self.add_css_class("modified")
+        else:
+            self.label.set_text(self._original_title)
+            self.remove_css_class("modified")
+
+class ChromeTabBar(Adw.WrapBox):
+    """
+    Chrome-like tab bar with correct separator model.
+    separators[i] is BEFORE tab[i]
+    and there is one final separator after last tab.
+    """
+
+    def __init__(self):
+        super().__init__(orientation=Gtk.Orientation.HORIZONTAL)
+
+        self.set_child_spacing(0)
+        self.add_css_class("chrome-tab-bar")
+
+        self.tabs = []
+        self.separators = []   # separator BEFORE each tab + 1 final separator
+
+        # Create initial left separator (this one will be hidden)
+        first_sep = Gtk.Box()
+        first_sep.set_size_request(1, 1)
+        first_sep.add_css_class("chrome-tab-separator")
+        self.append(first_sep)
+        self.separators.append(first_sep)
+
+        # Dropdown button
+        self.tab_dropdown = Gtk.MenuButton()
+        self.tab_dropdown.set_icon_name("pan-down-symbolic")
+        self.tab_dropdown.add_css_class("flat")
+        self.tab_dropdown.set_size_request(24, 32)
+        self.append(self.tab_dropdown)
+
+    # ------------------------------------------------------------
+    # Add a new tab
+    # ------------------------------------------------------------
+    def add_tab(self, tab):
+        idx = len(self.tabs)
+
+        # Insert tab AFTER separator[idx]
+        before_sep = self.separators[idx]
+        self.insert_child_after(tab, before_sep)
+
+        # Insert separator AFTER the tab
+        new_sep = Gtk.Box()
+        new_sep.set_size_request(1, 1)
+        new_sep.add_css_class("chrome-tab-separator")
+        self.insert_child_after(new_sep, tab)
+
+        # update internal lists
+        self.tabs.append(tab)
+        self.separators.insert(idx + 1, new_sep)
+
+        # move dropdown to end
+        self.reorder_child_after(self.tab_dropdown, new_sep)
+
+        # setup hover handlers
+        self._connect_hover(tab)
+
+        self._update_dropdown()
+        self._update_separators()
+
+    # ------------------------------------------------------------
+    # Remove a tab
+    # ------------------------------------------------------------
+    def remove_tab(self, tab):
+        if tab not in self.tabs:
+            return
+
+        idx = self.tabs.index(tab)
+
+        # Remove tab widget
+        self.remove(tab)
+
+        # Remove separator AFTER this tab
+        sep = self.separators[idx + 1]
+        self.remove(sep)
+        del self.separators[idx + 1]
+
+        # Keep separator[0] (always exists)
+        self.tabs.remove(tab)
+
+        self._update_dropdown()
+        self._update_separators()
+
+    # ------------------------------------------------------------
+    # Hover behavior
+    # ------------------------------------------------------------
+    def _connect_hover(self, tab):
+        motion = Gtk.EventControllerMotion()
+
+        def on_enter(ctrl, x, y):
+            i = self.tabs.index(tab)
+            self._hide_pair(i)
+
+        def on_leave(ctrl):
+            self._update_separators()
+
+        motion.connect("enter", on_enter)
+        motion.connect("leave", on_leave)
+        tab.add_controller(motion)
+
+    # ------------------------------------------------------------
+    # Called when tab becomes active externally
+    # ------------------------------------------------------------
+    def set_tab_active(self, tab):
+        for t in self.tabs:
+            t.set_active(t is tab)
+
+        # update separators *immediately*
+        self._update_separators()
+
+    # ------------------------------------------------------------
+    # Core separator logic
+    # ------------------------------------------------------------
+    def _hide_pair(self, i):
+        """Hide left + right separators for tab[i]."""
+
+        # Hide left separator if not first tab
+        if i > 0:
+            self.separators[i].add_css_class("hidden")
+
+        # Hide right separator if not last tab
+        if i + 1 < len(self.separators) - 1:
+            self.separators[i + 1].add_css_class("hidden")
+
+    def _update_separators(self):
+        # Reset all
+        for sep in self.separators:
+            sep.remove_css_class("hidden")
+
+        # Hide edge separators permanently
+        if self.separators:
+            # hide left-most
+            self.separators[0].add_css_class("hidden")
+            # hide right-most
+            if len(self.separators) > 1:
+                self.separators[-1].add_css_class("hidden")
+
+        # Hide around active tab
+        for i, tab in enumerate(self.tabs):
+            if tab.has_css_class("active"):
+                self._hide_pair(i)
+
+    # ------------------------------------------------------------
+    # Dropdown
+    # ------------------------------------------------------------
+    def _update_dropdown(self):
+        self.tab_dropdown.set_visible(len(self.tabs) >= 8)
+
+        if len(self.tabs) < 8:
+            return
+
+        menu = Gio.Menu()
+        for i, tab in enumerate(self.tabs):
+            title = tab.get_title()
+            if tab.has_css_class("modified"):
+                title = "● " + title
+            if len(title) > 32:
+                title = title[:28] + "…"
+            menu.append(title, f"win.tab_activate::{i}")
+
+        self.tab_dropdown.set_menu_model(menu)
+
+
+class EditorWindow(Adw.ApplicationWindow):
+    def __init__(self, app):
+        super().__init__(application=app)
+        self.set_title("Virtual Text Editor")
+        self.set_default_size(800, 600)
+
+        # Main layout container
+        main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        
+        # Header Bar
         header = Adw.HeaderBar()
-        layout.add_top_bar(header)
+        main_box.append(header)
 
+        # Toolbar / Actions
         open_btn = Gtk.Button(label="Open")
+        open_btn.add_css_class("flat")  
         open_btn.connect("clicked", self.open_file)
         header.pack_start(open_btn)
+        
+        new_tab_btn = Gtk.Button(label="New Tab")
+        new_tab_btn.add_css_class("flat")  
+        new_tab_btn.connect("clicked", self.on_new_tab)
+        header.pack_start(new_tab_btn)
         
         # Add menu button
         menu_button = Gtk.MenuButton()
@@ -4509,36 +4862,112 @@ class EditorWindow(Adw.ApplicationWindow):
         menu_button.set_menu_model(self.create_menu())
         header.pack_end(menu_button)
         
+        # Tab List (ChromeTabBar)
+        self.tab_bar = ChromeTabBar()
+        self.tab_bar.set_margin_start(6)
+        main_box.append(self.tab_bar)
+
+        # Tab View (Content)
+        self.tab_view = Adw.TabView()
+        self.tab_view.set_vexpand(True)
+        self.tab_view.set_hexpand(True)
+        main_box.append(self.tab_view)
+
+        self.set_content(main_box)
+        
         # Setup actions
         self.setup_actions()
+        
+        # Add initial tab
+        self.add_tab()
 
-        # Clean GTK4 layout: scrollbars OUTSIDE the text viewport
-        grid = Gtk.Grid()
-        grid.set_column_spacing(0)
-        grid.set_row_spacing(0)
+    def get_current_page(self):
+        page = self.tab_view.get_selected_page()
+        if page:
+            return page.get_child()
+        return None
 
-        # Text view occupies top-left cell
-        grid.attach(self.view, 0, 0, 1, 1)
+    def on_new_tab(self, btn):
+        self.add_tab()
+        
+    def add_tab(self, path=None):
+        editor = EditorPage()
+        
+        page = self.tab_view.append(editor)
+        page.set_title(editor.get_title())
+        self.tab_view.set_selected_page(page)
+        
+        # Add ChromeTab to ChromeTabBar
+        self.add_tab_button(page)
+        
+        return editor
 
-        # Vertical scrollbar on right
-        self.vscroll.set_hexpand(False)
-        self.vscroll.set_vexpand(True)
-        grid.attach(self.vscroll, 1, 0, 1, 1)
+    def add_tab_button(self, page):
+        editor = page.get_child()
+        title = editor.get_title()
+        
+        tab = ChromeTab(title=title)
+        tab._page = page
+        
+        # Connect signals
+        tab.connect('activate-requested', self.on_tab_activated)
+        tab.connect('close-requested', self.on_tab_close_requested)
+        
+        self.tab_bar.add_tab(tab)
+        
+        # Set active state
+        self.update_active_tab()
 
-        # Horizontal scrollbar at bottom
-        self.hscroll.set_hexpand(True)
-        self.hscroll.set_vexpand(False)
-        grid.attach(self.hscroll, 0, 1, 1, 1)
+    def on_tab_activated(self, tab):
+        if hasattr(tab, '_page'):
+            self.tab_view.set_selected_page(tab._page)
+            self.update_active_tab()
 
-        # Corner filler (bottom-right)
-        corner = Gtk.Box()
-        corner.set_size_request(12, 12)
-        grid.attach(corner, 1, 1, 1, 1)
-        # Match viewport/editor background
-        grid.set_css_classes(["editor-surface"])
-        # Put grid into main window
-        layout.set_content(grid)
+    def on_tab_close_requested(self, tab):
+        if hasattr(tab, '_page'):
+            self.close_tab(tab._page)
+
+    def close_tab(self, page):
+        # Remove from TabView
+        self.tab_view.close_page(page)
+        
+        # Remove from ChromeTabBar
+        for tab in self.tab_bar.tabs:
+            if hasattr(tab, '_page') and tab._page == page:
+                self.tab_bar.remove_tab(tab)
+                break
+        
+        self.update_active_tab()
+
+    def update_active_tab(self):
+        selected_page = self.tab_view.get_selected_page()
+        for tab in self.tab_bar.tabs:
+            if hasattr(tab, '_page'):
+                is_active = (tab._page == selected_page)
+                tab.set_active(is_active)
+
+    def on_tab_selected(self, flowbox, child):
+        # Obsolete, replaced by on_tab_activated
+        pass
+
+    def update_tab_title(self, page):
+        editor = page.get_child()
+        title = editor.get_title()
+        page.set_title(title)
+        
+        # Update ChromeTab
+        for tab in self.tab_bar.tabs:
+            if hasattr(tab, '_page') and tab._page == page:
+                tab.set_title(title)
+                break
     
+    def on_tab_activate_action(self, action, parameter):
+        """Handle tab activation from dropdown menu"""
+        idx = parameter.get_int32()
+        if 0 <= idx < len(self.tab_bar.tabs):
+            tab = self.tab_bar.tabs[idx]
+            self.on_tab_activated(tab)
+
     def create_menu(self):
         """Create the application menu"""
         menu = Gio.Menu()
@@ -4572,13 +5001,22 @@ class EditorWindow(Adw.ApplicationWindow):
         encoding_action = Gio.SimpleAction.new_stateful(
             "encoding",
             GLib.VariantType.new("s"),
-            GLib.Variant.new_string(self.current_encoding)
+            GLib.Variant.new_string("utf-8")
         )
         encoding_action.connect("activate", self.on_encoding_changed)
         self.add_action(encoding_action)
+        
+        # Tab activation action for dropdown
+        tab_activate_action = Gio.SimpleAction.new("tab_activate", GLib.VariantType.new("i"))
+        tab_activate_action.connect("activate", self.on_tab_activate_action)
+        self.add_action(tab_activate_action)
     
     def on_save_as(self, action, parameter):
         """Handle Save As menu action"""
+        page = self.get_current_page()
+        if not page:
+            return
+
         dialog = Gtk.FileDialog()
         dialog.set_title("Save As")
         
@@ -4594,85 +5032,47 @@ class EditorWindow(Adw.ApplicationWindow):
     
     def save_file(self, path):
         """Save the current buffer to a file with the current encoding"""
+        page = self.get_current_page()
+        if not page:
+            return
+
         try:
-            total_lines = self.buf.total()
+            total_lines = page.buf.total()
             lines = []
             for i in range(total_lines):
-                lines.append(self.buf.get_line(i))
+                lines.append(page.buf.get_line(i))
             
             content = "\n".join(lines)
             
             # Write with current encoding
-            with open(path, "w", encoding=self.current_encoding) as f:
+            with open(path, "w", encoding=page.current_encoding) as f:
                 f.write(content)
             
-            self.set_title(os.path.basename(path))
-            print(f"File saved as {path} with encoding {self.current_encoding}")
+            page.path = path
+            self.update_tab_title(self.tab_view.get_selected_page())
+            print(f"File saved as {path} with encoding {page.current_encoding}")
         except Exception as e:
             print(f"Error saving file: {e}")
-    
+
     def on_encoding_changed(self, action, parameter):
         """Handle encoding selection from menu"""
         encoding = parameter.get_string()
-        self.current_encoding = encoding
         action.set_state(parameter)
         
-        print(f"Encoding changed to: {encoding} (will be used for next save)")
+        page = self.get_current_page()
+        if page:
+            page.current_encoding = encoding
+            print(f"Encoding changed to: {encoding} (will be used for next save)")
         # Note: We don't change self.buf.file.encoding because that would
         # re-decode the file with the wrong encoding, showing garbage.
         # The encoding change only affects how the file is saved.
 
 
-    def on_buffer_changed(self, *_):
-        self.view.queue_draw()
 
-        width = self.view.get_width()
-        height = self.view.get_height()
-
-        if width <= 0 or height <= 0:
-            GLib.idle_add(self.on_buffer_changed)
-            return
-
-        total = self.buf.total()
-        line_h = self.view.renderer.line_h
-        visible = max(1, height // line_h)
-
-        # vertical
-        vadj = self.view.vadj
-        vadj.set_lower(0)
-        vadj.set_upper(total)
-        vadj.set_page_size(visible)
-        vadj.set_step_increment(1)
-        vadj.set_page_increment(visible)
-
-        # clamp
-        max_scroll = max(0, total - visible)
-        if self.view.scroll_line > max_scroll:
-            self.view.scroll_line = max_scroll
-            vadj.set_value(max_scroll)
-
-        # horizontal
-        doc_w = self.view.renderer.max_line_width
-        hadj = self.view.hadj
-
-        hadj.set_lower(0)
-        hadj.set_upper(doc_w)
-        hadj.set_page_size(width)
-        hadj.set_step_increment(20)
-        hadj.set_page_increment(width // 2)
-
-        max_hscroll = max(0, doc_w - width)
-        if self.view.scroll_x > max_hscroll:
-            self.view.scroll_x = max_hscroll
-            hadj.set_value(max_hscroll)
-
-        # scrollbar show/hide
-        self.vscroll.set_visible(total > visible)
-        self.hscroll.set_visible(doc_w > width)
 
     def open_file(self, *_):
         dialog = Gtk.FileDialog()
-
+    
         def done(dialog, result):
             try:
                 f = dialog.open_finish(result)
@@ -4690,35 +5090,24 @@ class EditorWindow(Adw.ApplicationWindow):
                 return False
             
             def index_complete():
-                self.buf.load(idx)
-
-                self.view.scroll_line = 0
-                self.view.scroll_x = 0
+                # Create new tab
+                editor = self.add_tab(path)
+                editor.path = path
+                editor.buf.load(idx)
+                editor.current_encoding = idx.encoding
                 
-                # Set current encoding to match the loaded file
-                self.current_encoding = idx.encoding
-                # Update the encoding action state
-                encoding_action = self.lookup_action("encoding")
-                if encoding_action:
-                    encoding_action.set_state(GLib.Variant.new_string(self.current_encoding))
+                # Update title
+                page = self.tab_view.get_page(editor)
+                self.update_tab_title(page)
                 
-                # Trigger width scan for the new file
-                self.view.file_loaded()
-
-                # update scrollbars after loading new file
-                #GLib.idle_add(lambda: (self.hscroll.update_visibility(),
-                 #      self.vscroll.update_visibility(),
-                  #     False))
-
-
-                self.view.queue_draw()
-                self.vscroll.queue_draw()
-                self.hscroll.queue_draw()
-
-                self.set_title(os.path.basename(path))
+                # Force layout update
+                editor.view.queue_draw()
+                editor.vscroll.queue_draw()
+                editor.hscroll.queue_draw()
+    
                 loading_dialog.close()
                 return False
-
+    
             def index_in_thread():
                 try:
                     idx.index_file(progress_callback)
@@ -4730,7 +5119,7 @@ class EditorWindow(Adw.ApplicationWindow):
             thread = Thread(target=index_in_thread)
             thread.daemon = True
             thread.start()
-
+    
         dialog.open(self, None, done)
 
 
