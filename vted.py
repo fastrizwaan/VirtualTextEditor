@@ -109,6 +109,24 @@ CSS_OVERLAY_SCROLLBAR = """
     border-radius: 10px;
 }
 
+/* Dragging state */
+.chrome-tab.dragging {
+    opacity: 0.5;
+}
+
+/* Drop indicator line */
+.tab-drop-indicator {
+    background: linear-gradient(to bottom, 
+        transparent 0%, 
+        rgba(0, 127, 255, 0.8) 20%, 
+        rgba(0, 127, 255, 1) 50%, 
+        rgba(0, 127, 255, 0.8) 80%, 
+        transparent 100%);
+    min-width: 3px;
+    border-radius: 2px;
+}
+
+
 /* Modified marker */
 .chrome-tab.modified {
     font-style: italic;
@@ -4634,6 +4652,9 @@ class EditorPage(Gtk.Grid):
             return os.path.basename(self.path)
         return "Untitled Document 3"
 
+# Global variable to track dragged tab (bypassing GObject marshalling issues)
+DRAGGED_TAB = None
+
 class ChromeTab(Gtk.Box):
     """A custom tab widget that behaves like Chrome tabs"""
    
@@ -4659,7 +4680,17 @@ class ChromeTab(Gtk.Box):
         self.label.set_single_line_mode(True)
         self.label.set_hexpand(True)
         self.label.set_halign(Gtk.Align.CENTER)
-        overlay.set_child(self.label)
+        
+        # Wrapper button for the tab content (handles clicks and prevents window drag)
+        self.tab_button = Gtk.Button()
+        self.tab_button.add_css_class("flat")
+        self.tab_button.set_child(self.label)
+        # We handle activation via the gesture now, not the button's clicked signal
+        # self.tab_button.connect('clicked', lambda b: self.emit('activate-requested'))
+        self.tab_button.set_hexpand(True)
+        self.tab_button.set_vexpand(True)
+        
+        overlay.set_child(self.tab_button)
         
         # Close button (overlaid on top right)
         if closeable:
@@ -4676,19 +4707,35 @@ class ChromeTab(Gtk.Box):
        
         self.append(overlay)
        
-        # Make the entire tab clickable
-        click_gesture = Gtk.GestureClick()
-        click_gesture.connect('pressed', self._on_tab_clicked)
-        self.add_controller(click_gesture)
-       
         self._is_active = False
         self._original_title = title
+        self.tab_bar = None  # Will be set by ChromeTabBar
+        
+        # Setup drag source on the button
+        drag_source = Gtk.DragSource()
+        drag_source.set_actions(Gdk.DragAction.MOVE)
+        drag_source.connect('prepare', self._on_drag_prepare)
+        drag_source.connect('drag-begin', self._on_drag_begin)
+        drag_source.connect('drag-end', self._on_drag_end)
+        self.tab_button.add_controller(drag_source)
+        
+        # Explicitly claim clicks to prevent window dragging
+        # This is needed because Adw.ToolbarView/HeaderBar can be aggressive
+        click_gesture = Gtk.GestureClick()
+        click_gesture.connect('pressed', self._on_tab_pressed)
+        click_gesture.connect('released', self._on_tab_released)
+        self.tab_button.add_controller(click_gesture)
+       
+    def _on_tab_pressed(self, gesture, n_press, x, y):
+        gesture.set_state(Gtk.EventSequenceState.CLAIMED)
+        
+    def _on_tab_released(self, gesture, n_press, x, y):
+        self.emit('activate-requested')
        
     def _on_close_clicked(self, button):
         self.emit('close-requested')
        
-    def _on_tab_clicked(self, gesture, n_press, x, y):
-        self.emit('activate-requested')
+    # Removed _on_tab_clicked as the button handles it now
        
     def set_title(self, title):
         self._original_title = title
@@ -4711,6 +4758,34 @@ class ChromeTab(Gtk.Box):
         else:
             self.label.set_text(self._original_title)
             self.remove_css_class("modified")
+    
+    # Drag and drop handlers
+    def _on_drag_prepare(self, source, x, y):
+        """Prepare drag operation - return content provider"""
+        # Use a simple string content to ensure DropTarget accepts it
+        # We rely on the global DRAGGED_TAB for the actual object
+        return Gdk.ContentProvider.new_for_value("TAB")
+    
+    def _on_drag_begin(self, source, drag):
+        """Called when drag begins - set visual feedback"""
+        global DRAGGED_TAB
+        DRAGGED_TAB = self
+        
+        # Add a CSS class for visual feedback
+        self.add_css_class("dragging")
+        
+        # Create drag icon from the tab widget
+        paintable = Gtk.WidgetPaintable.new(self)
+        source.set_icon(paintable, 0, 0)
+    
+    def _on_drag_end(self, source, drag, delete_data):
+        """Called when drag ends - cleanup"""
+        global DRAGGED_TAB
+        DRAGGED_TAB = None
+        self.remove_css_class("dragging")
+
+
+
 
 class ChromeTabBar(Adw.WrapBox):
     """
@@ -4728,6 +4803,13 @@ class ChromeTabBar(Adw.WrapBox):
 
         self.tabs = []
         self.separators = []   # separator BEFORE each tab + 1 final separator
+        
+        # Drop indicator for drag and drop
+        self.drop_indicator = Gtk.Box()
+        self.drop_indicator.set_size_request(3, 24)
+        self.drop_indicator.add_css_class("tab-drop-indicator")
+        self.drop_indicator.set_visible(False)
+        self.drop_indicator_position = -1
 
         # Create initial left separator (this one will be hidden)
         first_sep = Gtk.Box()
@@ -4742,6 +4824,14 @@ class ChromeTabBar(Adw.WrapBox):
         self.tab_dropdown.add_css_class("flat")
         self.tab_dropdown.set_size_request(24, 32)
         self.append(self.tab_dropdown)
+        
+        # Setup drop target on the tab bar itself
+        # Accept strings (we pass "TAB")
+        drop_target = Gtk.DropTarget.new(str, Gdk.DragAction.MOVE)
+        drop_target.connect('drop', self._on_tab_bar_drop)
+        drop_target.connect('motion', self._on_tab_bar_motion)
+        drop_target.connect('leave', self._on_tab_bar_leave)
+        self.add_controller(drop_target)
 
     # ------------------------------------------------------------
     # Add a new tab
@@ -4762,6 +4852,10 @@ class ChromeTabBar(Adw.WrapBox):
         # update internal lists
         self.tabs.append(tab)
         self.separators.insert(idx + 1, new_sep)
+        
+        # Set tab_bar reference for drag and drop
+        tab.tab_bar = self
+        tab.separator = new_sep
 
         # move dropdown to end
         self.reorder_child_after(self.tab_dropdown, new_sep)
@@ -4835,6 +4929,51 @@ class ChromeTabBar(Adw.WrapBox):
         # Hide right separator if not last tab
         if i + 1 < len(self.separators) - 1:
             self.separators[i + 1].add_css_class("hidden")
+    
+    # ------------------------------------------------------------
+    # Reorder tab (for drag and drop)
+    # ------------------------------------------------------------
+    def reorder_tab(self, tab, new_index):
+        """Reorder a tab to a new position"""
+        if tab not in self.tabs:
+            return
+        
+        old_index = self.tabs.index(tab)
+        if old_index == new_index:
+            return
+        
+        # Get the separator associated with this tab (stored on the tab)
+        tab_separator = tab.separator
+        
+        # Remove from old position in list
+        self.tabs.pop(old_index)
+        
+        # Insert at new position in list
+        self.tabs.insert(new_index, tab)
+        
+        # Reorder widgets in the WrapBox
+        # Determine the widget to place the tab after
+        if new_index == 0:
+            # Move to beginning (after first separator)
+            anchor = self.separators[0]
+        else:
+            # Move after the separator of the previous tab
+            # Note: self.tabs has already been updated, so self.tabs[new_index-1] is the previous tab
+            prev_tab = self.tabs[new_index - 1]
+            anchor = prev_tab.separator
+        
+        self.reorder_child_after(tab, anchor)
+        self.reorder_child_after(tab_separator, tab)
+        
+        # Rebuild separator list to match new tab order
+        # self.separators[0] is the fixed first separator
+        # Then for each tab, we append its separator
+        self.separators = [self.separators[0]] + [t.separator for t in self.tabs]
+        
+        # Update separators
+        self._update_separators()
+        self._update_dropdown()
+
 
     def _update_separators(self):
         # Reset all
@@ -4873,6 +5012,148 @@ class ChromeTabBar(Adw.WrapBox):
             menu.append(title, f"win.tab_activate::{i}")
 
         self.tab_dropdown.set_menu_model(menu)
+    
+    # ------------------------------------------------------------
+    # Drag and drop handlers
+    # ------------------------------------------------------------
+    def _calculate_drop_position(self, x, y):
+        """Calculate the drop position based on mouse X and Y coordinates"""
+        # Group tabs by row
+        rows = {}
+        for i, tab in enumerate(self.tabs):
+            success, bounds = tab.compute_bounds(self)
+            if not success:
+                continue
+                
+            # Use the middle Y of the tab to identify the row
+            mid_y = bounds.origin.y + bounds.size.height / 2
+            
+            # Find matching row (simple clustering)
+            found_row = False
+            for row_y in rows:
+                if abs(row_y - mid_y) < bounds.size.height / 2:
+                    rows[row_y].append((i, tab))
+                    found_row = True
+                    break
+            if not found_row:
+                rows[mid_y] = [(i, tab)]
+        
+        # Sort rows by Y coordinate
+        sorted_row_ys = sorted(rows.keys())
+        
+        # Find which row the mouse is in
+        target_row_y = None
+        for row_y in sorted_row_ys:
+            # Check if Y is within this row's vertical bounds (approx)
+            # We assume standard height for all tabs
+            if abs(y - row_y) < 20: # 20 is roughly half height
+                target_row_y = row_y
+                break
+        
+        # If no row matched, check if we are below the last row
+        if target_row_y is None:
+            if not sorted_row_ys:
+                return len(self.tabs)
+            if y > sorted_row_ys[-1] + 20:
+                return len(self.tabs)
+            # If above first row, return 0
+            if y < sorted_row_ys[0] - 20:
+                return 0
+            # If between rows, find the closest one
+            closest_y = min(sorted_row_ys, key=lambda ry: abs(y - ry))
+            target_row_y = closest_y
+
+        # Now find position within the target row
+        row_tabs = rows[target_row_y]
+        
+        for i, tab in row_tabs:
+            success, bounds = tab.compute_bounds(self)
+            if not success:
+                continue
+                
+            tab_center = bounds.origin.x + bounds.size.width / 2
+            
+            if x < tab_center:
+                return i
+        
+        # If past the last tab in this row, return index after the last tab in this row
+        last_idx_in_row = row_tabs[-1][0]
+        return last_idx_in_row + 1
+    
+    def _show_drop_indicator(self, position):
+        """Show the drop indicator line at the specified position"""
+        if position == self.drop_indicator_position:
+            return
+        
+        # Remove indicator from old position
+        if self.drop_indicator.get_parent():
+            self.remove(self.drop_indicator)
+        
+        self.drop_indicator_position = position
+        
+        # Insert indicator at new position
+        if position == 0:
+            # Before first tab
+            self.insert_child_after(self.drop_indicator, self.separators[0])
+        elif position < len(self.tabs):
+            # Between tabs - insert after the separator before this tab
+            self.insert_child_after(self.drop_indicator, self.separators[position])
+        else:
+            # After last tab
+            if len(self.separators) > len(self.tabs):
+                self.insert_child_after(self.drop_indicator, self.separators[-1])
+        
+        self.drop_indicator.set_visible(True)
+    
+    def _hide_drop_indicator(self):
+        """Hide the drop indicator"""
+        self.drop_indicator.set_visible(False)
+        if self.drop_indicator.get_parent():
+            self.remove(self.drop_indicator)
+        self.drop_indicator_position = -1
+    
+    def _on_tab_bar_motion(self, target, x, y):
+        """Handle drag motion over the tab bar"""
+        # Calculate and show drop position
+        position = self._calculate_drop_position(x, y)
+        self._show_drop_indicator(position)
+        return Gdk.DragAction.MOVE
+    
+    def _on_tab_bar_leave(self, target):
+        """Handle drag leaving the tab bar"""
+        self._hide_drop_indicator()
+    
+    def _on_tab_bar_drop(self, target, value, x, y):
+        """Handle drop on the tab bar"""
+        global DRAGGED_TAB
+        
+        # Use global variable if available, otherwise fall back to value
+        dragged_tab = DRAGGED_TAB if DRAGGED_TAB else value
+        
+        if not isinstance(dragged_tab, ChromeTab):
+            return False
+        
+        if dragged_tab not in self.tabs:
+            return False
+        
+        # Calculate drop position
+        drop_position = self._calculate_drop_position(x, y)
+        
+        # Get current position of dragged tab
+        current_position = self.tabs.index(dragged_tab)
+        
+        # Adjust drop position if dragging from before the drop point
+        if current_position < drop_position:
+            drop_position -= 1
+        
+        # Reorder the tab
+        if current_position != drop_position:
+            self.reorder_tab(dragged_tab, drop_position)
+        
+        # Hide the drop indicator
+        self._hide_drop_indicator()
+        
+        return True
 
 
 class EditorWindow(Adw.ApplicationWindow):
@@ -4913,6 +5194,7 @@ class EditorWindow(Adw.ApplicationWindow):
         self.tab_view = Adw.TabView()
         self.tab_view.set_vexpand(True)
         self.tab_view.set_hexpand(True)
+        self.tab_view.connect("notify::selected-page", self.on_page_selection_changed)
         toolbar_view.set_content(self.tab_view)
 
         self.set_content(toolbar_view)
@@ -4922,6 +5204,30 @@ class EditorWindow(Adw.ApplicationWindow):
         
         # Add initial tab
         self.add_tab()
+        
+        # Add key controller for shortcuts (Ctrl+Tab)
+        key_ctrl = Gtk.EventControllerKey()
+        key_ctrl.connect("key-pressed", self.on_window_key_pressed)
+        self.add_controller(key_ctrl)
+
+    def on_window_key_pressed(self, controller, keyval, keycode, state):
+        # Ctrl+Tab / Ctrl+Shift+Tab
+        if state & Gdk.ModifierType.CONTROL_MASK:
+            if keyval == Gdk.KEY_Tab or keyval == Gdk.KEY_ISO_Left_Tab:
+                direction = 1
+                if (state & Gdk.ModifierType.SHIFT_MASK) or keyval == Gdk.KEY_ISO_Left_Tab:
+                    direction = -1
+                
+                n_pages = self.tab_view.get_n_pages()
+                if n_pages > 1:
+                    current_page = self.tab_view.get_selected_page()
+                    current_idx = self.tab_view.get_page_position(current_page)
+                    
+                    new_idx = (current_idx + direction) % n_pages
+                    new_page = self.tab_view.get_nth_page(new_idx)
+                    self.tab_view.set_selected_page(new_page)
+                    return True
+        return False
 
     def get_current_page(self):
         page = self.tab_view.get_selected_page()
@@ -4963,7 +5269,10 @@ class EditorWindow(Adw.ApplicationWindow):
     def on_tab_activated(self, tab):
         if hasattr(tab, '_page'):
             self.tab_view.set_selected_page(tab._page)
-            self.update_active_tab()
+            # self.update_active_tab() # Handled by notify::selected-page now
+
+    def on_page_selection_changed(self, tab_view, pspec):
+        self.update_active_tab()
 
     def on_tab_close_requested(self, tab):
         if hasattr(tab, '_page'):
