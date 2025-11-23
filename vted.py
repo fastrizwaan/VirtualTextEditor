@@ -118,7 +118,7 @@ CSS_OVERLAY_SCROLLBAR = """
 .chrome-tab button {
     min-width: 10px;
     min-height: 10px;
-    padding: 3px;
+    padding: 4px;
     opacity: 0.10;
     background: none;
     border: none;
@@ -126,9 +126,15 @@ CSS_OVERLAY_SCROLLBAR = """
     color: #FFFFFF;
 }
 
-.chrome-tab:hover button,
+.chrome-tab:hover button{
+    opacity: 1;
+
+}
+
 .chrome-tab.active button {
     opacity: 1;
+    background: rgba(62,62,62,1);
+
 }
 
 /* ========================
@@ -169,6 +175,7 @@ CSS_OVERLAY_SCROLLBAR = """
 
 .chrome-tab:hover .chrome-tab-close-button {
     opacity: 1;
+    background: @headerbar_bg_color;
 }
 
 .chrome-tab-close-button:hover {
@@ -4641,32 +4648,34 @@ class ChromeTab(Gtk.Box):
         self.set_halign(Gtk.Align.START)
         self.add_css_class("chrome-tab")
        
-        # Tab content container
-        content_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0 )
-
-        # Title label
+        # Create overlay for label and close button
+        overlay = Gtk.Overlay()
+        
+        # Title label (uses full width)
         self.label = Gtk.Label()
         self.label.set_text(title)
         self.label.set_max_width_chars(30)
         self.label.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
         self.label.set_single_line_mode(True)
         self.label.set_hexpand(True)
-        #self.label.set_halign(Gtk.Align.END)
-        content_box.append(self.label)
-       
-        # Close button
+        self.label.set_halign(Gtk.Align.CENTER)
+        overlay.set_child(self.label)
+        
+        # Close button (overlaid on top right)
         if closeable:
             self.close_button = Gtk.Button()
             self.close_button.set_icon_name("window-close-symbolic")
             self.close_button.add_css_class("flat")
             self.close_button.add_css_class("circular")
-            #self.close_button.set_halign(Gtk.Align.CENTER)
             self.close_button.add_css_class("chrome-tab-close-button")
-            self.close_button.set_size_request(16, 16)
+            self.close_button.set_size_request(20, 20)
+            self.close_button.set_halign(Gtk.Align.END)
+            self.close_button.set_valign(Gtk.Align.CENTER)
+            self.close_button.set_margin_end(0)
             self.close_button.connect('clicked', self._on_close_clicked)
-            content_box.append(self.close_button)
+            overlay.add_overlay(self.close_button)
        
-        self.append(content_box)
+        self.append(overlay)
        
         # Make the entire tab clickable
         click_gesture = Gtk.GestureClick()
