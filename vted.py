@@ -1101,7 +1101,270 @@ class VirtualBuffer(GObject.Object):
         
         self.selection.clear()
         self.emit("changed")
+    
+    def delete_word_forward(self):
+        """Delete from cursor to end of current word (Ctrl+Delete)"""
+        import unicodedata
         
+        def is_word_char(ch):
+            if ch == '_':
+                return True
+            cat = unicodedata.category(ch)
+            return cat[0] in ('L', 'N', 'M')
+        
+        if self.selection.has_selection():
+            self.delete_selection()
+            return
+        
+        ln = self.cursor_line
+        col = self.cursor_col
+        line = self.get_line(ln)
+        
+        # If at end of line, delete the newline
+        if col >= len(line):
+            if ln < self.total() - 1:
+                next_line = self.get_line(ln + 1)
+                new_line = line + next_line
+                
+                if ln in self.inserted_lines:
+                    self.inserted_lines[ln] = new_line
+                else:
+                    self.edits[ln] = new_line
+                
+                new_ins = {}
+                for k, v in self.inserted_lines.items():
+                    if k <= ln:
+                        new_ins[k] = v
+                    elif k == ln + 1:
+                        pass
+                    else:
+                        new_ins[k - 1] = v
+                
+                new_ed = {}
+                for k, v in self.edits.items():
+                    if k <= ln:
+                        new_ed[k] = v
+                    elif k == ln + 1:
+                        pass
+                    else:
+                        new_ed[k - 1] = v
+                
+                new_del = set()
+                for k in self.deleted_lines:
+                    if k <= ln:
+                        new_del.add(k)
+                    elif k == ln + 1:
+                        pass
+                    else:
+                        new_del.add(k - 1)
+                
+                self.inserted_lines = new_ins
+                self.edits = new_ed
+                self.deleted_lines = new_del
+                self._add_offset(ln + 2, -1)
+            
+            self.emit("changed")
+            return
+        
+        end_col = col
+        while end_col < len(line) and line[end_col].isspace():
+            end_col += 1
+        
+        if end_col < len(line):
+            if is_word_char(line[end_col]):
+                while end_col < len(line) and is_word_char(line[end_col]):
+                    end_col += 1
+            elif not line[end_col].isspace():
+                while end_col < len(line) and not line[end_col].isspace() and not is_word_char(line[end_col]):
+                    end_col += 1
+        
+        new_line = line[:col] + line[end_col:]
+        
+        if ln in self.inserted_lines:
+            self.inserted_lines[ln] = new_line
+        else:
+            self.edits[ln] = new_line
+        
+        self.emit("changed")
+
+    def delete_word_backward(self):
+        """Delete from cursor to start of current word (Ctrl+Backspace)"""
+        import unicodedata
+        
+        def is_word_char(ch):
+            if ch == '_':
+                return True
+            cat = unicodedata.category(ch)
+            return cat[0] in ('L', 'N', 'M')
+        
+        if self.selection.has_selection():
+            self.delete_selection()
+            return
+        
+        ln = self.cursor_line
+        col = self.cursor_col
+        line = self.get_line(ln)
+        
+        if col == 0:
+            if ln > 0:
+                prev_line = self.get_line(ln - 1)
+                new_line = prev_line + line
+                
+                if ln - 1 in self.inserted_lines:
+                    self.inserted_lines[ln - 1] = new_line
+                else:
+                    self.edits[ln - 1] = new_line
+                
+                new_ins = {}
+                for k, v in self.inserted_lines.items():
+                    if k < ln:
+                        new_ins[k] = v
+                    elif k == ln:
+                        pass
+                    else:
+                        new_ins[k - 1] = v
+                
+                new_ed = {}
+                for k, v in self.edits.items():
+                    if k < ln:
+                        new_ed[k] = v
+                    elif k == ln:
+                        pass
+                    else:
+                        new_ed[k - 1] = v
+                
+                new_del = set()
+                for k in self.deleted_lines:
+                    if k < ln:
+                        new_del.add(k)
+                    elif k == ln:
+                        pass
+                    else:
+                        new_del.add(k - 1)
+                
+                self.inserted_lines = new_ins
+                self.edits = new_ed
+                self.deleted_lines = new_del
+                self._add_offset(ln + 1, -1)
+                
+                self.cursor_line = ln - 1
+                self.cursor_col = len(prev_line)
+            
+            self.emit("changed")
+            return
+        
+        start_col = col
+        while start_col > 0 and line[start_col - 1].isspace():
+            start_col -= 1
+        
+        if start_col > 0:
+            if is_word_char(line[start_col - 1]):
+                while start_col > 0 and is_word_char(line[start_col - 1]):
+                    start_col -= 1
+            elif not line[start_col - 1].isspace():
+                while start_col > 0 and not line[start_col - 1].isspace() and not is_word_char(line[start_col - 1]):
+                    start_col -= 1
+        
+        new_line = line[:start_col] + line[col:]
+        
+        if ln in self.inserted_lines:
+            self.inserted_lines[ln] = new_line
+        else:
+            self.edits[ln] = new_line
+        
+        self.cursor_col = start_col
+        self.emit("changed")
+    
+    def delete_to_line_end(self):
+        """Delete from cursor to end of line (Ctrl+Shift+Delete)"""
+        if self.selection.has_selection():
+            self.delete_selection()
+            return
+        
+        ln = self.cursor_line
+        col = self.cursor_col
+        line = self.get_line(ln)
+        
+        new_line = line[:col]
+        
+        if ln in self.inserted_lines:
+            self.inserted_lines[ln] = new_line
+        else:
+            self.edits[ln] = new_line
+        
+        self.emit("changed")
+    
+    def delete_to_line_start(self):
+        """Delete from cursor to start of line (Ctrl+Shift+Backspace)"""
+        if self.selection.has_selection():
+            self.delete_selection()
+            return
+        
+        ln = self.cursor_line
+        col = self.cursor_col
+        line = self.get_line(ln)
+        
+        new_line = line[col:]
+        
+        if ln in self.inserted_lines:
+            self.inserted_lines[ln] = new_line
+        else:
+            self.edits[ln] = new_line
+        
+        self.cursor_col = 0
+        self.emit("changed")
+    
+    def delete_current_line(self):
+        """Delete the entire current line including newline (Ctrl+D)"""
+        ln = self.cursor_line
+        
+        if self.total() == 1:
+            if ln in self.inserted_lines:
+                self.inserted_lines[ln] = ""
+            else:
+                self.edits[ln] = ""
+            self.cursor_col = 0
+            self.emit("changed")
+            return
+        
+        new_ins = {}
+        for k, v in self.inserted_lines.items():
+            if k < ln:
+                new_ins[k] = v
+            elif k == ln:
+                pass
+            else:
+                new_ins[k - 1] = v
+        
+        new_ed = {}
+        for k, v in self.edits.items():
+            if k < ln:
+                new_ed[k] = v
+            elif k == ln:
+                pass
+            else:
+                new_ed[k - 1] = v
+        
+        new_del = set()
+        for k in self.deleted_lines:
+            if k < ln:
+                new_del.add(k)
+            elif k == ln:
+                pass
+            else:
+                new_del.add(k - 1)
+        
+        self.inserted_lines = new_ins
+        self.edits = new_ed
+        self.deleted_lines = new_del
+        self._add_offset(ln + 1, -1)
+        
+        if ln >= self.total():
+            self.cursor_line = self.total() - 1
+        
+        self.cursor_col = 0
+        self.emit("changed")
+
 
 
     def insert_newline(self):
@@ -3596,14 +3859,38 @@ class VirtualTextView(Gtk.DrawingArea):
 
         # Editing keys
         if name == "BackSpace":
-            self.buf.backspace()
+            if ctrl_pressed and shift_pressed:
+                # Ctrl+Shift+Backspace: Delete to start of line
+                self.buf.delete_to_line_start()
+            elif ctrl_pressed:
+                # Ctrl+Backspace: Delete word backward
+                self.buf.delete_word_backward()
+            else:
+                # Normal backspace
+                self.buf.backspace()
             self.keep_cursor_visible()
             self.update_im_cursor_location()
             self.queue_draw()
             return True
 
         if name == "Delete":
-            self.buf.delete_key()
+            if ctrl_pressed and shift_pressed:
+                # Ctrl+Shift+Delete: Delete to end of line
+                self.buf.delete_to_line_end()
+            elif ctrl_pressed:
+                # Ctrl+Delete: Delete word forward
+                self.buf.delete_word_forward()
+            else:
+                # Normal delete
+                self.buf.delete_key()
+            self.keep_cursor_visible()
+            self.update_im_cursor_location()
+            self.queue_draw()
+            return True
+        
+        # Ctrl+D: Delete current line
+        if ctrl_pressed and name == "d":
+            self.buf.delete_current_line()
             self.keep_cursor_visible()
             self.update_im_cursor_location()
             self.queue_draw()
