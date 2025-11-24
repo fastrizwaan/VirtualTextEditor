@@ -819,40 +819,126 @@ class VirtualBuffer(GObject.Object):
 
         new_del = set()
         for k in self.deleted_lines:
-            if k <= ln:
+            if k < ln:
                 new_del.add(k)
             else:
-                # Shift up
                 new_del.add(k + lines_to_insert)
 
-        # Update current line with left part
+        # Set the new lines
         if ln in self.inserted_lines:
             new_ins[ln] = left_part
         else:
             new_ed[ln] = left_part
-
-        # Insert the middle lines
-        cur = ln
-        for m in middle:
-            cur += 1
-            new_ins[cur] = m
-
-        # Insert last line (right fragment)
+            
+        for i, m in enumerate(middle):
+            new_ins[ln + 1 + i] = m
+            
         new_ins[ln + lines_to_insert] = right_part
-
-        # Apply dicts
-        self.inserted_lines = new_ins
-        self.edits = new_ed
-        self.deleted_lines = new_del
-
-        # Offset update (insert count = len(parts)-1)
         self._add_offset(ln + 1, lines_to_insert)
-
-        # Final cursor
+        
         self.cursor_line = ln + lines_to_insert
-        self.cursor_col  = len(last)
+        self.cursor_col = len(right_part) - len(old[col:])
+        self.emit("changed")
 
-        self.selection.clear()
+    def indent_selection(self):
+        """Indent selected lines or current line"""
+        if not self.selection.has_selection():
+            # Just insert 4 spaces at cursor (handled by insert_text usually, but we can do it here)
+            self.insert_text("    ")
+            return
+
+        start_line, start_col, end_line, end_col = self.selection.get_bounds()
+        
+        # Indent all lines in range
+        for ln in range(start_line, end_line + 1):
+            line = self.get_line(ln)
+            new_line = "    " + line
+            
+            if ln in self.inserted_lines:
+                self.inserted_lines[ln] = new_line
+            else:
+                self.edits[ln] = new_line
+        
+        # Adjust selection and cursor
+        # If selection started at 0, keep it at 0 to include the new indentation
+        if start_col > 0:
+            self.selection.start_col += 4
+            
+        self.selection.end_col += 4
+        self.cursor_col += 4
+        self.emit("changed")
+
+    def unindent_selection(self):
+        """Unindent selected lines or current line"""
+        if not self.selection.has_selection():
+            # Unindent current line
+            ln = self.cursor_line
+            line = self.get_line(ln)
+            removed = 0
+            if line.startswith("    "):
+                new_line = line[4:]
+                removed = 4
+            elif line.startswith("   "):
+                new_line = line[3:]
+                removed = 3
+            elif line.startswith("  "):
+                new_line = line[2:]
+                removed = 2
+            elif line.startswith(" "):
+                new_line = line[1:]
+                removed = 1
+            else:
+                return # Nothing to unindent
+            
+            if ln in self.inserted_lines:
+                self.inserted_lines[ln] = new_line
+            else:
+                self.edits[ln] = new_line
+            
+            self.cursor_col = max(0, self.cursor_col - removed)
+            self.emit("changed")
+            return
+
+        start_line, start_col, end_line, end_col = self.selection.get_bounds()
+        
+        removed_start = 0
+        removed_end = 0
+        
+        # Unindent all lines in range
+        for ln in range(start_line, end_line + 1):
+            line = self.get_line(ln)
+            removed = 0
+            if line.startswith("    "):
+                new_line = line[4:]
+                removed = 4
+            elif line.startswith("   "):
+                new_line = line[3:]
+                removed = 3
+            elif line.startswith("  "):
+                new_line = line[2:]
+                removed = 2
+            elif line.startswith(" "):
+                new_line = line[1:]
+                removed = 1
+            else:
+                new_line = line
+            
+            if removed > 0:
+                if ln in self.inserted_lines:
+                    self.inserted_lines[ln] = new_line
+                else:
+                    self.edits[ln] = new_line
+            
+            if ln == start_line:
+                removed_start = removed
+            if ln == end_line:
+                removed_end = removed
+        
+        # We don't perfectly adjust selection cols for multi-line unindent 
+        # because each line might lose different amount. 
+        # But we should try to keep it valid.
+        self.selection.start_col = max(0, self.selection.start_col - removed_start)
+        self.selection.end_col = max(0, self.selection.end_col - removed_end)
         self.emit("changed")
 
 
@@ -3449,6 +3535,31 @@ class VirtualTextView(Gtk.DrawingArea):
             self.queue_draw()
             return True
 
+        if keyval == Gdk.KEY_Tab:
+            # Check for Shift+Tab (Unindent)
+            if (state & Gdk.ModifierType.SHIFT_MASK):
+                self.buf.unindent_selection()
+                self.queue_draw()
+                return True
+            
+            # Check for Multi-line Indent
+            if self.buf.selection.has_selection():
+                start_line, _, end_line, _ = self.buf.selection.get_bounds()
+                if start_line != end_line:
+                    self.buf.indent_selection()
+                    self.queue_draw()
+                    return True
+            
+            # Normal Tab (Insert spaces)
+            self.buf.insert_text("    ")
+            self.queue_draw()
+            return True
+
+        if keyval == Gdk.KEY_ISO_Left_Tab:
+            self.buf.unindent_selection()
+            self.queue_draw()
+            return True
+        
         # Ctrl+A - Select All
         if ctrl_pressed and name == "a":
             self.buf.select_all()
@@ -5319,6 +5430,10 @@ class EditorWindow(Adw.ApplicationWindow):
     def on_tab_activated(self, tab):
         if hasattr(tab, '_page'):
             self.tab_view.set_selected_page(tab._page)
+            # Focus the editor view
+            editor_page = tab._page.get_child()
+            if hasattr(editor_page, 'view'):
+                editor_page.view.grab_focus()
             # self.update_active_tab() # Handled by notify::selected-page now
 
     def on_page_selection_changed(self, tab_view, pspec):
