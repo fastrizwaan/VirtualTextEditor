@@ -834,6 +834,11 @@ class VirtualBuffer(GObject.Object):
             new_ins[ln + 1 + i] = m
             
         new_ins[ln + lines_to_insert] = right_part
+        
+        self.inserted_lines = new_ins
+        self.edits = new_ed
+        self.deleted_lines = new_del
+        
         self._add_offset(ln + 1, lines_to_insert)
         
         self.cursor_line = ln + lines_to_insert
@@ -5305,16 +5310,18 @@ class EditorWindow(Adw.ApplicationWindow):
         header = Adw.HeaderBar()
         toolbar_view.add_top_bar(header)
 
-        # Toolbar / Actions
+        # Open button
         open_btn = Gtk.Button(label="Open")
         open_btn.add_css_class("flat")  
         open_btn.connect("clicked", self.open_file)
         header.pack_start(open_btn)
-        
-        new_tab_btn = Gtk.Button(label="New Tab")
-        new_tab_btn.add_css_class("flat")  
-        new_tab_btn.connect("clicked", self.on_new_tab)
-        header.pack_start(new_tab_btn)
+
+        # New Tab button
+        btn_new = Gtk.Button()
+        btn_new.set_icon_name("tab-new-symbolic")
+        btn_new.set_tooltip_text("New Tab (Ctrl+T)")
+        btn_new.connect("clicked", self.on_new_tab)
+        header.pack_start(btn_new)
         
         # Add menu button
         menu_button = Gtk.MenuButton()
@@ -5408,6 +5415,10 @@ class EditorWindow(Adw.ApplicationWindow):
         
         # Add ChromeTab to ChromeTabBar
         self.add_tab_button(page)
+        
+        # Focus the new editor view
+        if hasattr(editor, 'view'):
+            editor.view.grab_focus()
         
         return editor
 
@@ -5631,6 +5642,10 @@ class EditorWindow(Adw.ApplicationWindow):
                 editor.hscroll.queue_draw()
     
                 loading_dialog.close()
+                
+                # Ensure focus is on the editor
+                editor.view.grab_focus()
+                
                 return False
     
             def index_in_thread():
