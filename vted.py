@@ -6300,9 +6300,22 @@ class EditorWindow(Adw.ApplicationWindow):
             try:
                 f = dialog.save_finish(result)
             except:
+                # User cancelled or error - still return focus
+                active_page = self.tab_view.get_selected_page()
+                if active_page:
+                    editor = active_page.get_child()
+                    if hasattr(editor, 'view'):
+                        editor.view.grab_focus()
                 return
             path = f.get_path()
             self.save_file(path)
+            
+            # Return focus to editor after save
+            active_page = self.tab_view.get_selected_page()
+            if active_page:
+                editor = active_page.get_child()
+                if hasattr(editor, 'view'):
+                    editor.view.grab_focus()
         
         dialog.save(self, None, done)
     
@@ -6342,29 +6355,42 @@ class EditorWindow(Adw.ApplicationWindow):
         # Note: We don't change self.buf.file.encoding because that would
         # re-decode the file with the wrong encoding, showing garbage.
         # The encoding change only affects how the file is saved.
+        
+        # Return focus to the active editor
+        active_page = self.tab_view.get_selected_page()
+        if active_page:
+            editor = active_page.get_child()
+            if hasattr(editor, 'view'):
+                editor.view.grab_focus()
 
 
     def on_word_wrap_toggle(self, action, parameter):
-        """Toggle word wrap for all editor tabs"""
-        # Toggle the state
+        """Toggle word wrap on/off"""
+        # Get current state
         current_state = action.get_state().get_boolean()
+        
+        # Toggle state
         new_state = not current_state
         action.set_state(GLib.Variant.new_boolean(new_state))
         
-        # Store as window-level setting
+        # Update global word wrap state
         self.word_wrap_enabled = new_state
         
-        # Apply to all existing tabs
+        # Update all open editors
         for i in range(self.tab_view.get_n_pages()):
             page = self.tab_view.get_nth_page(i)
-            editor = page.get_child()  # Get the actual EditorPage
+            editor = page.get_child()
             if hasattr(editor, 'view'):
                 editor.view.word_wrap = new_state
                 editor.view.queue_draw()
-                # Update scrollbar visibility
                 editor.view.update_scrollbar()
-
-
+        
+        # Return focus to the active editor
+        active_page = self.tab_view.get_selected_page()
+        if active_page:
+            editor = active_page.get_child()
+            if hasattr(editor, 'view'):
+                editor.view.grab_focus()
 
 
     def open_file(self, *_):
