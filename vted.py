@@ -79,7 +79,7 @@ CSS_OVERLAY_SCROLLBAR = """
 
     min-height: 24px;
     background: transparent;
-    color: #FF00a0;
+    color: #d0d0d0;
     min-height: 24px;
     border-radius: 8px;
 
@@ -89,7 +89,7 @@ CSS_OVERLAY_SCROLLBAR = """
 .chrome-tab:hover {
     color: #ffffff;
     min-height: 24px;
-    background: rgba(255,255,255,0.06);
+    background: rgba(255,255,255,0.10);
     padding-left: 12px;
     padding-right: 8px;
     padding-top:4px;
@@ -151,7 +151,8 @@ CSS_OVERLAY_SCROLLBAR = """
 
 .chrome-tab.active button {
     opacity: 1;
-    background: rgba(62,62,62,1);
+    background: @theme_bg;
+    color: @theme_fg;
 
 }
 
@@ -179,13 +180,8 @@ CSS_OVERLAY_SCROLLBAR = """
     min-width: 0;
 }
 /* ========================
-   Tab Bar
+   Tab close button
    ======================== */
-.chrome-tab-bar {
-    background-color: @headerbar_bg_color;
-    padding: 0;
-    margin: 0;
-}
 .chrome-tab-close-button {
     opacity: 0;
     transition: opacity 300ms ease, background-color 300ms ease;
@@ -193,17 +189,18 @@ CSS_OVERLAY_SCROLLBAR = """
 
 .chrome-tab:hover .chrome-tab-close-button {
     opacity: 1;
-    background: @headerbar_bg_color;
 }
 
-.chrome-tab-close-button:hover {
+.chrome-tab-close-button:hover  {
     background-color: rgba(255, 255, 255, 0.1);
 }
 
+.chrome-tab.active .chrome-tab-close-button:hover {
+    opacity: 1;
+    background-color: rgba(255,255,255,0.1);
+}
 
 """
-
-
 
 # ============================================================
 #   HELPER FUNCTIONS
@@ -4649,8 +4646,8 @@ class EditorPage(Gtk.Grid):
 
     def get_title(self):
         if self.path:
-            return os.path.basename(self.path) + "      "
-        return "Untitled Document      "
+            return os.path.basename(self.path)
+        return "Untitled Document"
 
 # Global variable to track dragged tab (bypassing GObject marshalling issues)
 DRAGGED_TAB = None
@@ -4675,6 +4672,7 @@ class ChromeTab(Gtk.Box):
         # Title label (uses full width)
         self.label = Gtk.Label()
         self.label.set_text(title)
+        self.label.set_margin_end(20)
         self.label.set_max_width_chars(30)
         self.label.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
         self.label.set_single_line_mode(True)
@@ -4799,7 +4797,6 @@ class ChromeTabBar(Adw.WrapBox):
 
         self.set_margin_start(4)
         self.set_child_spacing(0)
-        #self.add_css_class("chrome-tab-bar")
 
         self.tabs = []
         self.separators = []   # separator BEFORE each tab + 1 final separator
