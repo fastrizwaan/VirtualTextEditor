@@ -3714,20 +3714,54 @@ class Renderer:
                 
                 # Draw overlay even if over selection, but skip cursor
                 if scroll_line <= drop_ln < scroll_line + max_vis:
-                    drop_y = (drop_ln - scroll_line) * self.line_h
+                    # Calculate drop Y position accounting for word wrap
+                    if word_wrap_enabled:
+                        drop_y = 0
+                        target_ln = scroll_line
+                        wrap_width = int((alloc.width - ln_width - 20) * Pango.SCALE)
+                        
+                        # Sum up heights of all lines before drop line
+                        while target_ln < drop_ln:
+                            text = buf.get_line(target_ln)
+                            temp_layout = self.create_text_layout(cr, text if text else " ")
+                            temp_layout.set_wrap(Pango.WrapMode.WORD_CHAR)
+                            temp_layout.set_width(wrap_width)
+                            _, h = temp_layout.get_pixel_size()
+                            drop_y += max(self.line_h, h)
+                            target_ln += 1
+                    else:
+                        drop_y = (drop_ln - scroll_line) * self.line_h
+                    
                     drop_text = buf.get_line(drop_ln)
                     
                     # Calculate drop position
                     layout = self.create_text_layout(cr, drop_text if drop_text else " ")
-                    is_rtl = detect_rtl_line(drop_text)
-                    text_w, _ = layout.get_pixel_size()
-                    view_w = alloc.width
-                    base_x = self.calculate_text_base_x(is_rtl, text_w, view_w, ln_width, scroll_x)
+                    
+                    # Apply word wrap settings if enabled
+                    if word_wrap_enabled:
+                        layout.set_wrap(Pango.WrapMode.WORD_CHAR)
+                        wrap_width = int((alloc.width - ln_width - 20) * Pango.SCALE)
+                        layout.set_width(wrap_width)
+                        base_x = ln_width
+                    else:
+                        is_rtl = detect_rtl_line(drop_text)
+                        text_w, _ = layout.get_pixel_size()
+                        view_w = alloc.width
+                        base_x = self.calculate_text_base_x(is_rtl, text_w, view_w, ln_width, scroll_x)
                     
                     # Get x position for drop column
                     drop_byte_idx = visual_byte_index(drop_text, min(drop_col, len(drop_text)))
                     strong_pos, _ = layout.get_cursor_pos(drop_byte_idx)
                     drop_x = base_x + (strong_pos.x // Pango.SCALE)
+                    
+                    # For wrapped lines, also need to add the Y offset within the wrapped line
+                    if word_wrap_enabled:
+                        drop_y += strong_pos.y // Pango.SCALE
+                        cursor_height = strong_pos.height // Pango.SCALE
+                        if cursor_height == 0:
+                            cursor_height = self.line_h
+                    else:
+                        cursor_height = self.line_h
                     
                     # Determine colors based on copy (Ctrl) vs move mode
                     is_copy = view.ctrl_pressed_during_drag
@@ -3747,7 +3781,7 @@ class Renderer:
                         cr.set_source_rgba(*cursor_color)
                         cr.set_line_width(2)
                         cr.move_to(drop_x, drop_y)
-                        cr.line_to(drop_x, drop_y + self.line_h)
+                        cr.line_to(drop_x, drop_y + cursor_height)
                         cr.stroke()
                     
                     # Draw viewport border (1 pixel) - always show
