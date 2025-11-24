@@ -79,15 +79,19 @@ CSS_OVERLAY_SCROLLBAR = """
 
     min-height: 24px;
     background: transparent;
-    color: #e0e0e0;
+    color: #c0c0c0;
     min-height: 24px;
     border-radius: 8px;
 
     transition: background 140ms ease, color 140ms ease;
 }
 
+.chrome-tab label {
+    font-weight: normal;
+}
+
 .chrome-tab:hover {
-    color: #ffffff;
+    color: #c0c0c0;
     min-height: 24px;
     background: rgba(255,255,255,0.10);
     padding-left: 12px;
@@ -107,6 +111,10 @@ CSS_OVERLAY_SCROLLBAR = """
     padding-top:4px;
     padding-bottom:4px;
     border-radius: 10px;
+}
+
+.chrome-tab.active label {
+    font-weight: normal;
 }
 
 /* Dragging state */
@@ -132,28 +140,33 @@ CSS_OVERLAY_SCROLLBAR = """
     font-style: italic;
 }
 
-/* close button */
+/* Reset all buttons inside tab (fixes size regression) */
 .chrome-tab button {
+    background: none;
+    border: none;
+    box-shadow: none;
+    padding: 0;
+    margin: 0;
+    min-width: 0;
+    min-height: 0;
+}
+
+/* close button specific */
+.chrome-tab .chrome-tab-close-button {
     min-width: 10px;
     min-height: 10px;
     padding: 4px;
     opacity: 0.10;
-    background: none;
-    border: none;
-    box-shadow: none;
     color: #FFFFFF;
 }
 
-.chrome-tab:hover button{
+.chrome-tab:hover .chrome-tab-close-button {
     opacity: 1;
-
 }
 
-.chrome-tab.active button {
+.chrome-tab.active .chrome-tab-close-button {
     opacity: 1;
-    background: @theme_bg;
-    color: @theme_fg;
-
+    color: #FFFFFF;
 }
 
 /* ========================
@@ -4672,8 +4685,8 @@ class ChromeTab(Gtk.Box):
         # Title label (uses full width)
         self.label = Gtk.Label()
         self.label.set_text(title)
-        self.label.set_margin_end(20)
-        self.label.set_max_width_chars(30)
+        self.label.set_margin_end(24)
+        self.label.set_max_width_chars(20)
         self.label.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
         self.label.set_single_line_mode(True)
         self.label.set_hexpand(True)
