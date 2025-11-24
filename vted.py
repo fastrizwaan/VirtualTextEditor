@@ -2610,6 +2610,65 @@ class InputController:
         """End drag selection"""
         self.dragging = False
 
+    def get_visual_line_info(self, ln, col):
+        """Get visual line information for a cursor position in a wrapped line.
+        
+        Returns:
+            tuple: (visual_line_index, total_visual_lines, byte_offset_in_visual_line)
+            or None if word wrap is not enabled
+        """
+        if not hasattr(self.view, 'word_wrap') or not self.view.word_wrap:
+            return None
+            
+        # Create a temporary cairo surface to get layout
+        import cairo
+        surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
+        cr = cairo.Context(surface)
+        
+        # Get the text for this line
+        text = self.buf.get_line(ln)
+        if not text:
+            text = " "
+        
+        # Create layout with word wrap settings
+        layout = self.view.renderer.create_text_layout(cr, text)
+        layout.set_wrap(Pango.WrapMode.WORD_CHAR)
+        
+        # Calculate wrap width (same as in draw method)
+        alloc = self.view.get_allocation()
+        total = self.buf.total()
+        ln_width = self.view.renderer.calculate_line_number_width(cr, total)
+        wrap_width = max(100, (alloc.width - ln_width - 20) * Pango.SCALE)
+        layout.set_width(wrap_width)
+        
+        # Convert column to byte index
+        byte_idx = 0
+        for ch in text[:col]:
+            byte_idx += len(ch.encode("utf-8"))
+        
+        # Iterate through visual lines to find which one contains our cursor
+        iter = layout.get_iter()
+        visual_line_idx = 0
+        total_visual_lines = 0
+        found_line_idx = -1
+        
+        while True:
+            line = iter.get_line_readonly()
+            l_start = line.start_index
+            l_end = l_start + line.length
+            
+            # Check if cursor is in this visual line
+            if l_start <= byte_idx < l_end or (byte_idx == l_end and not iter.next_line()):
+                found_line_idx = visual_line_idx
+            
+            visual_line_idx += 1
+            
+            if not iter.next_line():
+                total_visual_lines = visual_line_idx
+                break
+        
+        return (found_line_idx, total_visual_lines, byte_idx)
+
     def move_left(self, extend_selection=False):
         b = self.buf
         ln, col = b.cursor_line, b.cursor_col
@@ -2646,6 +2705,68 @@ class InputController:
         b = self.buf
         ln = b.cursor_line
         
+        # Check if word wrap is enabled and we're in a wrapped line
+        visual_info = self.get_visual_line_info(ln, b.cursor_col)
+        
+        if visual_info is not None:
+            visual_line_idx, total_visual_lines, byte_idx = visual_info
+            
+            # If not on the first visual line of this logical line, move within the same logical line
+            if visual_line_idx > 0:
+                # Move to previous visual line within same logical line
+                import cairo
+                surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
+                cr = cairo.Context(surface)
+                
+                text = b.get_line(ln)
+                if not text:
+                    text = " "
+                
+                layout = self.view.renderer.create_text_layout(cr, text)
+                layout.set_wrap(Pango.WrapMode.WORD_CHAR)
+                
+                alloc = self.view.get_allocation()
+                total = b.total()
+                ln_width = self.view.renderer.calculate_line_number_width(cr, total)
+                wrap_width = max(100, (alloc.width - ln_width - 20) * Pango.SCALE)
+                layout.set_width(wrap_width)
+                
+                # Get cursor position to maintain X coordinate
+                strong_pos, _ = layout.get_cursor_pos(byte_idx)
+                target_x = strong_pos.x
+                
+                # Find the target visual line (previous one)
+                iter = layout.get_iter()
+                target_visual_idx = visual_line_idx - 1
+                current_idx = 0
+                
+                while current_idx < target_visual_idx:
+                    if not iter.next_line():
+                        break
+                    current_idx += 1
+                
+                # Get the line and find closest byte index to target_x
+                line = iter.get_line_readonly()
+                _, line_rect = iter.get_line_extents()
+                
+                # Use x_to_index to find the byte position at target_x
+                inside, index, trailing = line.x_to_index(target_x)
+                
+                # Convert byte index back to column
+                new_col = 0
+                byte_count = 0
+                for i, ch in enumerate(text):
+                    if byte_count >= index:
+                        new_col = i
+                        break
+                    byte_count += len(ch.encode("utf-8"))
+                else:
+                    new_col = len(text)
+                
+                b.set_cursor(ln, new_col, extend_selection)
+                return
+        
+        # Default behavior: move to previous logical line
         if ln > 0:
             # Can move up to previous line
             target = ln - 1
@@ -2675,6 +2796,68 @@ class InputController:
         b = self.buf
         ln = b.cursor_line
         
+        # Check if word wrap is enabled and we're in a wrapped line
+        visual_info = self.get_visual_line_info(ln, b.cursor_col)
+        
+        if visual_info is not None:
+            visual_line_idx, total_visual_lines, byte_idx = visual_info
+            
+            # If not on the last visual line of this logical line, move within the same logical line
+            if visual_line_idx < total_visual_lines - 1:
+                # Move to next visual line within same logical line
+                import cairo
+                surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
+                cr = cairo.Context(surface)
+                
+                text = b.get_line(ln)
+                if not text:
+                    text = " "
+                
+                layout = self.view.renderer.create_text_layout(cr, text)
+                layout.set_wrap(Pango.WrapMode.WORD_CHAR)
+                
+                alloc = self.view.get_allocation()
+                total = b.total()
+                ln_width = self.view.renderer.calculate_line_number_width(cr, total)
+                wrap_width = max(100, (alloc.width - ln_width - 20) * Pango.SCALE)
+                layout.set_width(wrap_width)
+                
+                # Get cursor position to maintain X coordinate
+                strong_pos, _ = layout.get_cursor_pos(byte_idx)
+                target_x = strong_pos.x
+                
+                # Find the target visual line (next one)
+                iter = layout.get_iter()
+                target_visual_idx = visual_line_idx + 1
+                current_idx = 0
+                
+                while current_idx < target_visual_idx:
+                    if not iter.next_line():
+                        break
+                    current_idx += 1
+                
+                # Get the line and find closest byte index to target_x
+                line = iter.get_line_readonly()
+                _, line_rect = iter.get_line_extents()
+                
+                # Use x_to_index to find the byte position at target_x
+                inside, index, trailing = line.x_to_index(target_x)
+                
+                # Convert byte index back to column
+                new_col = 0
+                byte_count = 0
+                for i, ch in enumerate(text):
+                    if byte_count >= index:
+                        new_col = i
+                        break
+                    byte_count += len(ch.encode("utf-8"))
+                else:
+                    new_col = len(text)
+                
+                b.set_cursor(ln, new_col, extend_selection)
+                return
+        
+        # Default behavior: move to next logical line
         if ln + 1 < b.total():
             # Can move down to next line
             target = ln + 1
@@ -3143,112 +3326,223 @@ class Renderer:
             # Draw selection background for this line if needed
             # Draw selection background for this line if needed
             if has_selection and sel_start_line <= ln <= sel_end_line:
-                # Calculate selection range for this line
-                if ln == sel_start_line and ln == sel_end_line:
-                    # Selection within single line
-                    start_col = sel_start_col
-                    end_col = sel_end_col
-                elif ln == sel_start_line:
-                    # First line of multi-line selection - select to end + newline indicator
-                    start_col = sel_start_col
-                    end_col = len(text) + 1  # +1 to include newline visual
-                elif ln == sel_end_line:
-                    # Last line of multi-line selection - select from start to end_col
-                    start_col = 0
-                    end_col = sel_end_col
-                else:
-                    # Middle line - select entire line + newline indicator
-                    start_col = 0
-                    end_col = len(text) + 1  # +1 to include newline visual
-                
-                # Calculate pixel positions for selection
-                if text or start_col == 0:
-                    # Get start position
-                    if start_col <= len(text):
-                        start_byte = visual_byte_index(text, min(start_col, len(text)))
-                        strong_pos, _ = layout.get_cursor_pos(start_byte)
-                        sel_start_x = base_x + (strong_pos.x // Pango.SCALE)
+                # For wrapped text, use simpler full-width selection
+                if word_wrap_enabled:
+                    print(f"DEBUG: In selection block. ln={ln} sel={sel_start_line}-{sel_end_line}")
+                    # Calculate selection range for this line
+                    if ln == sel_start_line and ln == sel_end_line:
+                        # Selection within single line
+                        start_col = sel_start_col
+                        end_col = sel_end_col
+                    elif ln == sel_start_line:
+                        # First line - select from start_col to end
+                        start_col = sel_start_col
+                        end_col = len(text)
+                    elif ln == sel_end_line:
+                        # Last line - select from start to end_col
+                        start_col = 0
+                        end_col = sel_end_col
                     else:
-                        sel_start_x = base_x
+                        # Middle line - select entire line
+                        start_col = 0
+                        end_col = len(text)
                     
-                    # Get end position
-                    if end_col <= len(text):
-                        end_byte = visual_byte_index(text, end_col)
-                        strong_pos, _ = layout.get_cursor_pos(end_byte)
-                        sel_end_x = base_x + (strong_pos.x // Pango.SCALE)
+                    # Draw selection using Pango ranges
+                    if start_col < end_col:
+                        cr.set_source_rgba(*self.selection_background_color, 0.7)
+                        
+                        # Get byte indices
+                        start_byte = visual_byte_index(text, start_col) if text else 0
+                        end_byte = visual_byte_index(text, end_col) if text else 0
+                        
+                        print(f"DEBUG: Selection ln={ln} col={start_col}-{end_col} byte={start_byte}-{end_byte}")
+                        
+                        # Iterate through layout lines to draw selection
+                        iter = layout.get_iter()
+                        loop_count = 0
+                        while True:
+                            loop_count += 1
+                            line = iter.get_line_readonly()
+                            l_start = line.start_index
+                            l_end = l_start + line.length
+                            
+                            # Calculate intersection with selection
+                            r_start = max(start_byte, l_start)
+                            r_end = min(end_byte, l_end)
+                            
+                            print(f"DEBUG: Line l={l_start}-{l_end} r={r_start}-{r_end}")
+                            
+                            if r_start < r_end:
+                                # Get pixel ranges for this segment
+                                ranges = line.get_x_ranges(r_start, r_end)
+                                
+                                # Fallback for broken get_x_ranges (sometimes returns single item list)
+                                if not ranges or len(ranges) < 2:
+                                    x1 = line.index_to_x(r_start, False)
+                                    x2 = line.index_to_x(r_end, False)
+                                    ranges = [x1, x2]
+                                
+                                # Get line vertical position
+                                _, line_rect = iter.get_line_extents()
+                                line_y = line_rect.y // Pango.SCALE
+                                line_h = line_rect.height // Pango.SCALE
+                                
+                                print(f"DEBUG: Ranges={ranges} y={line_y} h={line_h}")
+                                
+                                # Draw rectangles for each range
+                                for i in range(0, len(ranges) - 1, 2):
+                                    x1 = ranges[i] // Pango.SCALE
+                                    x2 = ranges[i+1] // Pango.SCALE
+                                    print(f"DEBUG: Rect {x1},{line_y} {x2-x1}x{line_h}")
+                                    cr.rectangle(ln_width + x1, y + line_y, x2 - x1, line_h)
+                                    cr.fill()
+                            
+                            # Handle newline selection (at the end of the last visual line)
+                            # Check if this is the last line
+                            is_last_line = not iter.next_line()
+                            
+                            if end_col > len(text) and is_last_line:
+                                # This is the last line and newline is selected
+                                # Note: iter is now invalid/past end because next_line() returned False? 
+                                # Actually next_line() moves to next line if possible. If it returns False, it stays?
+                                # Pango docs say: "Returns False if the iterator is already at the end"
+                                # So if it returns False, we are still at the last line? No, usually it means we can't move further.
+                                # But we need the line extents of the line we just processed.
+                                
+                                # Let's use the line object we already have!
+                                # We need the extents of the line we just processed.
+                                # But iter.get_line_extents() gets extents of current line.
+                                # If next_line() returned False, are we still on the last line? Yes.
+                                
+                                _, line_rect = iter.get_line_extents() 
+                                line_y = line_rect.y // Pango.SCALE
+                                line_h = line_rect.height // Pango.SCALE
+                                
+                                # Find end of text on this line
+                                if line.length > 0:
+                                    # Get end of line position
+                                    ranges = line.get_x_ranges(l_end, l_end)
+                                    if ranges:
+                                        last_x = ranges[0] // Pango.SCALE
+                                    else:
+                                        last_x = line_rect.width // Pango.SCALE 
+                                else:
+                                    last_x = 0
+                                    
+                                # Draw newline indicator to edge of view
+                                cr.rectangle(ln_width + last_x, y + line_y, alloc.width - (ln_width + last_x), line_h)
+                                cr.fill()
+                                
+                            if is_last_line:
+                                break
+                
+                else:
+                    # Calculate selection range for this line
+                    if ln == sel_start_line and ln == sel_end_line:
+                        # Selection within single line
+                        start_col = sel_start_col
+                        end_col = sel_end_col
+                    elif ln == sel_start_line:
+                        # First line of multi-line selection - select to end + newline indicator
+                        start_col = sel_start_col
+                        end_col = len(text) + 1  # +1 to include newline visual
+                    elif ln == sel_end_line:
+                        # Last line of multi-line selection - select from start to end_col
+                        start_col = 0
+                        end_col = sel_end_col
                     else:
-                        # Include newline indicator - extend to viewport end
-                        if text:
-                            end_byte = visual_byte_index(text, len(text))
+                        # Middle line - select entire line + newline indicator
+                        start_col = 0
+                        end_col = len(text) + 1  # +1 to include newline visual
+                    
+                    # Calculate pixel positions for selection
+                    if text or start_col == 0:
+                        # Get start position
+                        if start_col <= len(text):
+                            start_byte = visual_byte_index(text, min(start_col, len(text)))
+                            strong_pos, _ = layout.get_cursor_pos(start_byte)
+                            sel_start_x = base_x + (strong_pos.x // Pango.SCALE)
+                        else:
+                            sel_start_x = base_x
+                        
+                        # Get end position
+                        if end_col <= len(text):
+                            end_byte = visual_byte_index(text, end_col)
                             strong_pos, _ = layout.get_cursor_pos(end_byte)
                             sel_end_x = base_x + (strong_pos.x // Pango.SCALE)
                         else:
-                            sel_end_x = base_x
-                        
-                        # For lines with newline selected, we'll extend to viewport later
-                        text_end_x = sel_end_x
-                else:
-                    # Empty line with selection
-                    sel_start_x = base_x
-                    text_end_x = base_x
-                    sel_end_x = base_x
-                
-                # Draw main text selection rectangle
-                if end_col <= len(text):
-                    # Normal selection within text
-                    cr.set_source_rgba(*self.selection_background_color, 0.7)
-                    if is_rtl:
-                        cr.rectangle(min(sel_start_x, sel_end_x), y, 
-                                abs(sel_end_x - sel_start_x), self.line_h)
+                            # Include newline indicator - extend to viewport end
+                            if text:
+                                end_byte = visual_byte_index(text, len(text))
+                                strong_pos, _ = layout.get_cursor_pos(end_byte)
+                                sel_end_x = base_x + (strong_pos.x // Pango.SCALE)
+                            else:
+                                sel_end_x = base_x
+                            
+                            # For lines with newline selected, we'll extend to viewport later
+                            text_end_x = sel_end_x
                     else:
-                        cr.rectangle(sel_start_x, y, 
-                                sel_end_x - sel_start_x, self.line_h)
-                    cr.fill()
-                else:
-                    # Selection includes newline - draw text selection + newline indicator
-                    # Draw text selection part
-                    if text:
+                        # Empty line with selection
+                        sel_start_x = base_x
+                        text_end_x = base_x
+                        sel_end_x = base_x
+                
+                    # Draw main text selection rectangle
+                    if end_col <= len(text):
+                        # Normal selection within text
                         cr.set_source_rgba(*self.selection_background_color, 0.7)
                         if is_rtl:
-                            cr.rectangle(min(sel_start_x, text_end_x), y, 
-                                    abs(text_end_x - sel_start_x), self.line_h)
+                            cr.rectangle(min(sel_start_x, sel_end_x), y, 
+                                    abs(sel_end_x - sel_start_x), self.line_h)
                         else:
                             cr.rectangle(sel_start_x, y, 
-                                    text_end_x - sel_start_x, self.line_h)
+                                    sel_end_x - sel_start_x, self.line_h)
                         cr.fill()
-                    
-                    # Draw newline indicator
-                    # For RTL: newline area is on the LEFT (from ln_width to text start)
-                    # For LTR: newline area is on the RIGHT (from text end to viewport edge)
-                    if is_rtl:
-                        # RTL: draw from line number area to start of text
-                        if text:
-                            # Draw from ln_width to the leftmost edge of the text
-                            newline_start_x = ln_width
-                            newline_end_x = base_x  # base_x is where RTL text starts
-                        else:
-                            # Empty line: draw from ln_width to viewport edge
-                            newline_start_x = ln_width
-                            newline_end_x = alloc.width
                     else:
-                        # LTR: draw from text end to viewport edge
-                        newline_start_x = text_end_x if text else ln_width
-                        newline_end_x = alloc.width
-                    
-                    # Use slightly darker/different shade for newline area
-                    cr.set_source_rgba(*self.selection_background_color, 0.7)
-                    cr.rectangle(newline_start_x, y, 
-                            newline_end_x - newline_start_x, self.line_h)
-                    cr.fill()
-                    
-                    # Draw a subtle vertical line at the end of actual text to mark the newline position
-                    # Don't really need it disabled it with 0.0
-                    if text:
-                        cr.set_source_rgba(*self.selection_foreground_color, 0.0)
-                        cr.set_line_width(1)
-                        cr.move_to(text_end_x, y)
-                        cr.line_to(text_end_x, y + self.line_h)
-                        cr.stroke()
+                        # Selection includes newline - draw text selection + newline indicator
+                        # Draw text selection part
+                        if text:
+                            cr.set_source_rgba(*self.selection_background_color, 0.7)
+                            if is_rtl:
+                                cr.rectangle(min(sel_start_x, text_end_x), y, 
+                                        abs(text_end_x - sel_start_x), self.line_h)
+                            else:
+                                cr.rectangle(sel_start_x, y, 
+                                        text_end_x - sel_start_x, self.line_h)
+                            cr.fill()
+                        
+                        # Draw newline indicator
+                        # For RTL: newline area is on the LEFT (from ln_width to text start)
+                        # For LTR: newline area is on the RIGHT (from text end to viewport edge)
+                        if is_rtl:
+                            # RTL: draw from line number area to start of text
+                            if text:
+                                # Draw from ln_width to the leftmost edge of the text
+                                newline_start_x = ln_width
+                                newline_end_x = base_x  # base_x is where RTL text starts
+                            else:
+                                # Empty line: draw from ln_width to viewport edge
+                                newline_start_x = ln_width
+                                newline_end_x = alloc.width
+                        else:
+                            # LTR: draw from text end to viewport edge
+                            newline_start_x = text_end_x if text else ln_width
+                            newline_end_x = alloc.width
+                        
+                        # Use slightly darker/different shade for newline area
+                        cr.set_source_rgba(*self.selection_background_color, 0.7)
+                        cr.rectangle(newline_start_x, y, 
+                                newline_end_x - newline_start_x, self.line_h)
+                        cr.fill()
+                        
+                        # Draw a subtle vertical line at the end of actual text to mark the newline position
+                        # Don't really need it disabled it with 0.0
+                        if text:
+                            cr.set_source_rgba(*self.selection_foreground_color, 0.0)
+                            cr.set_line_width(1)
+                            cr.move_to(text_end_x, y)
+                            cr.line_to(text_end_x, y + self.line_h)
+                            cr.stroke()
 
             # Draw line text
             if text:  # Only draw if there's actual text
@@ -3325,29 +3619,67 @@ class Renderer:
         # ============================================================
         # CURSOR
         # ============================================================
+        # ============================================================
+        # CURSOR
+        # ============================================================
         if cursor_visible and line_visible:
             cursor_text = buf.get_line(cl)
-            from_scroll = cl - scroll_line
-            cy = from_scroll * self.line_h
+            
+            # Calculate visual Y position
+            # If word wrap is enabled, we need to sum up heights of all previous visible lines
+            if word_wrap_enabled:
+                cy = 0
+                target_ln = scroll_line
+                # alloc is passed as argument
+                wrap_width = int((alloc.width - ln_width - 20) * Pango.SCALE)
+                
+                # Iterate to find the cursor line's Y position
+                while target_ln < cl:
+                    text = buf.get_line(target_ln)
+                    layout = self.create_text_layout(cr, text if text else " ")
+                    layout.set_wrap(Pango.WrapMode.WORD_CHAR)
+                    layout.set_width(wrap_width)
+                    _, h = layout.get_pixel_size()
+                    cy += max(self.line_h, h)
+                    target_ln += 1
+            else:
+                from_scroll = cl - scroll_line
+                cy = from_scroll * self.line_h
 
-            # Use same layout logic as above
+            # Create layout for cursor line
             layout = self.create_text_layout(cr, cursor_text if cursor_text else " ")
-            is_rtl = detect_rtl_line(cursor_text)
-            text_w, _ = layout.get_pixel_size()
-            view_w = alloc.width
-            base_x = self.calculate_text_base_x(is_rtl, text_w, view_w, ln_width, scroll_x)
+            
+            if word_wrap_enabled:
+                # alloc is passed as argument
+                wrap_width = int((alloc.width - ln_width - 20) * Pango.SCALE)
+                layout.set_wrap(Pango.WrapMode.WORD_CHAR)
+                layout.set_width(wrap_width)
+                base_x = ln_width
+            else:
+                is_rtl = detect_rtl_line(cursor_text)
+                text_w, _ = layout.get_pixel_size()
+                view_w = alloc.width
+                base_x = self.calculate_text_base_x(is_rtl, text_w, view_w, ln_width, scroll_x)
 
             byte_idx = visual_byte_index(cursor_text, cc)
             strong_pos, _ = layout.get_cursor_pos(byte_idx)
+            
+            # Calculate cursor position within the layout
             cx = base_x + (strong_pos.x // Pango.SCALE)
+            cursor_y_offset = strong_pos.y // Pango.SCALE
+            cursor_height = strong_pos.height // Pango.SCALE
+            
+            # Ensure minimum cursor height
+            if cursor_height == 0:
+                cursor_height = self.line_h
 
-            # Draw cursor line (small vertical bar)
+            # Draw cursor line
             phase = cursor_phase if cursor_phase is not None else 0.0
             alpha = 0.3 + 0.7 * phase
             cr.set_source_rgba(0, 0.5, 1.0, alpha)
             cr.set_line_width(2)
-            cr.move_to(cx, cy)
-            cr.line_to(cx, cy + self.line_h)
+            cr.move_to(cx, cy + cursor_y_offset)
+            cr.line_to(cx, cy + cursor_y_offset + cursor_height)
             cr.stroke()
         
         # ============================================================
@@ -4637,6 +4969,61 @@ class VirtualTextView(Gtk.DrawingArea):
         cr = cairo.Context(surface)
 
         ln_width = self.renderer.calculate_line_number_width(cr, self.buf.total())
+        
+        # Handle word wrap selection
+        if self.word_wrap:
+            current_y = 0
+            target_ln = self.scroll_line
+            alloc = self.get_allocation()
+            wrap_width = int((alloc.width - ln_width - 20) * Pango.SCALE)
+            
+            # Iterate through visible lines to find which one was clicked
+            while target_ln < self.buf.total():
+                text = self.buf.get_line(target_ln)
+                layout = self.create_text_layout(cr, text if text else " ")
+                
+                # Apply wrap settings matching Renderer.draw
+                layout.set_wrap(Pango.WrapMode.WORD_CHAR)
+                layout.set_width(wrap_width)
+                
+                _, h = layout.get_pixel_size()
+                line_height = max(self.renderer.line_h, h)
+                
+                # Check if click is within this line's vertical area
+                if y < current_y + line_height:
+                    # Found the line!
+                    base_x = ln_width
+                    
+                    # Convert coordinates to Pango layout coordinates
+                    layout_x = (x - base_x) * Pango.SCALE
+                    layout_y = (y - current_y) * Pango.SCALE
+                    
+                    # Get index from Pango
+                    inside, index, trailing = layout.xy_to_index(layout_x, layout_y)
+                    
+                    # Convert byte index to character column
+                    if text:
+                        byte_slice = text.encode('utf-8')[:index]
+                        col = len(byte_slice.decode('utf-8', errors='ignore'))
+                        if trailing > 0:
+                            col += 1
+                    else:
+                        col = 0
+                        
+                    return target_ln, col
+                
+                current_y += line_height
+                target_ln += 1
+                
+                # Stop if we've gone past the click y (should be caught above, but safety)
+                if current_y > y:
+                    break
+            
+            # If below all lines, return end of last line
+            last_ln = self.buf.total() - 1
+            return last_ln, len(self.buf.get_line(last_ln))
+
+        # Standard non-wrapped logic
         ln = self.scroll_line + int(y // self.renderer.line_h)
         ln = max(0, min(ln, self.buf.total() - 1))
 
