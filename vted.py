@@ -79,7 +79,7 @@ CSS_OVERLAY_SCROLLBAR = """
 
     min-height: 24px;
     background: transparent;
-    color: #d0d0d0;
+    color: #e0e0e0;
     min-height: 24px;
     border-radius: 8px;
 
@@ -4726,6 +4726,8 @@ class ChromeTab(Gtk.Box):
        
     def _on_tab_pressed(self, gesture, n_press, x, y):
         gesture.set_state(Gtk.EventSequenceState.CLAIMED)
+        if self.tab_bar:
+            self.tab_bar.hide_separators_for_tab(self)
         
     def _on_tab_released(self, gesture, n_press, x, y):
         self.emit('activate-requested')
@@ -4791,6 +4793,10 @@ class ChromeTabBar(Adw.WrapBox):
     separators[i] is BEFORE tab[i]
     and there is one final separator after last tab.
     """
+
+    __gsignals__ = {
+        'tab-reordered': (GObject.SignalFlags.RUN_FIRST, None, (object, int)),
+    }
 
     def __init__(self):
         super().__init__(orientation=Gtk.Orientation.HORIZONTAL)
@@ -4926,6 +4932,12 @@ class ChromeTabBar(Adw.WrapBox):
         # Hide right separator if not last tab
         if i + 1 < len(self.separators) - 1:
             self.separators[i + 1].add_css_class("hidden")
+
+    def hide_separators_for_tab(self, tab):
+        """Immediately hide separators around this tab (used on press)"""
+        if tab in self.tabs:
+            i = self.tabs.index(tab)
+            self._hide_pair(i)
     
     # ------------------------------------------------------------
     # Reorder tab (for drag and drop)
@@ -4970,6 +4982,9 @@ class ChromeTabBar(Adw.WrapBox):
         # Update separators
         self._update_separators()
         self._update_dropdown()
+        
+        # Emit signal to notify parent (EditorWindow) to update Adw.TabView order
+        self.emit('tab-reordered', tab, new_index)
 
 
     def _update_separators(self):
@@ -5185,6 +5200,7 @@ class EditorWindow(Adw.ApplicationWindow):
         
         # Tab List (ChromeTabBar) as a top bar
         self.tab_bar = ChromeTabBar()
+        self.tab_bar.connect('tab-reordered', self.on_tab_reordered)
         toolbar_view.add_top_bar(self.tab_bar)
 
         # Tab View (Content)
@@ -5299,6 +5315,12 @@ class EditorWindow(Adw.ApplicationWindow):
         if hasattr(tab, '_page'):
             self.close_tab(tab._page)
 
+    def on_tab_reordered(self, tab_bar, tab, new_index):
+        """Sync Adw.TabView order with ChromeTabBar order"""
+        if hasattr(tab, '_page'):
+            # Reorder the page in Adw.TabView
+            self.tab_view.reorder_page(tab._page, new_index)
+
     def close_tab(self, page):
         # Remove from TabView
         self.tab_view.close_page(page)
@@ -5317,6 +5339,9 @@ class EditorWindow(Adw.ApplicationWindow):
             if hasattr(tab, '_page'):
                 is_active = (tab._page == selected_page)
                 tab.set_active(is_active)
+            
+        # Force update of separators to hide them around the new active tab
+        self.tab_bar._update_separators()
 
     def on_tab_selected(self, flowbox, child):
         # Obsolete, replaced by on_tab_activated
