@@ -3048,6 +3048,21 @@ class Renderer:
 
         layout = PangoCairo.create_layout(cr)
         layout.set_font_description(self.font)
+        
+        # Enable word wrap if requested (passed via view parameter)
+        # Note: word_wrap parameter should be added to method signature
+        word_wrap_enabled = False
+        if hasattr(buf, '_view') and hasattr(buf._view, 'word_wrap'):
+            word_wrap_enabled = buf._view.word_wrap
+        
+        if word_wrap_enabled:
+            # Set wrap mode and width for word wrapping
+            layout.set_wrap(Pango.WrapMode.WORD_CHAR)
+            # Set width to viewport width minus line number area
+            total = buf.total() if buf else 1
+            ln_width = self.calculate_line_number_width(cr, total)
+            wrap_width = max(100, (alloc.width - ln_width - 20) * Pango.SCALE)  # 20px margin
+            layout.set_width(wrap_width)
         layout.set_auto_dir(True)
 
         total = buf.total()
@@ -3088,6 +3103,14 @@ class Renderer:
             # Prepare for line text
             is_rtl = line_is_rtl(text)
             layout.set_auto_dir(True)
+            
+            # Apply word wrap settings for this line if enabled
+            if word_wrap_enabled:
+                layout.set_wrap(Pango.WrapMode.WORD_CHAR)
+                layout.set_width(wrap_width)
+            else:
+                layout.set_width(-1)  # No wrap
+            
             layout.set_text(text if text else " ", -1)  # Use space for empty lines
 
             ink, logical = layout.get_pixel_extents()
@@ -3099,11 +3122,21 @@ class Renderer:
                 max_width_seen = line_total_width
 
             # Calculate base position
-            base_x = self.calculate_text_base_x(is_rtl, text_w, alloc.width, ln_width, scroll_x)
+            # When word wrap is enabled, don't use horizontal scroll
+            if word_wrap_enabled:
+                base_x = ln_width  # Start right after line numbers
+            else:
+                base_x = self.calculate_text_base_x(is_rtl, text_w, alloc.width, ln_width, scroll_x)
             
             # Set clipping region to prevent text from overlapping line numbers
             cr.save()
-            cr.rectangle(ln_width, y, alloc.width - ln_width, self.line_h)
+            # Use actual layout height for clipping if word wrap is enabled
+            if word_wrap_enabled:
+                _, layout_height = layout.get_pixel_size()
+                clip_height = max(self.line_h, layout_height)
+            else:
+                clip_height = self.line_h
+            cr.rectangle(ln_width, y, alloc.width - ln_width, clip_height)
             cr.clip()
 
             # Draw selection background for this line if needed
@@ -3221,13 +3254,19 @@ class Renderer:
             if text:  # Only draw if there's actual text
                 cr.set_source_rgb(*self.text_foreground_color)
                 cr.move_to(base_x, y)
-                layout.set_text(text, -1)
+                # Text is already set above with wrap settings, just draw it
                 PangoCairo.show_layout(cr, layout)
             
             # Restore clipping region
             cr.restore()
-
-            y += self.line_h
+            
+            # Increment y position - use actual layout height if word wrapped
+            if word_wrap_enabled:
+                # Get the actual height of this (possibly wrapped) line
+                layout_width, layout_height = layout.get_pixel_size()
+                y += max(self.line_h, layout_height)
+            else:
+                y += self.line_h
 
         # Update tracked maximum line width for horizontal scrollbar
         self.max_line_width = max_width_seen
@@ -3429,6 +3468,7 @@ class VirtualTextView(Gtk.DrawingArea):
         self.ctrl = InputController(self, buf)
         self.scroll_line = 0
         self.scroll_x = 0
+        self.word_wrap = False  # Word wrap state (rendering only)
 
         self.set_focusable(True)
         self.set_vexpand(True)
@@ -3575,7 +3615,15 @@ class VirtualTextView(Gtk.DrawingArea):
 
         def finalize():
             self.vscroll.set_visible(total_lines > visible)
-            self.hscroll.set_visible(doc_w > viewport_width)
+            # Hide horizontal scrollbar if word wrap is enabled
+            word_wrap_enabled = False
+            if hasattr(self.buf, '_view') and hasattr(self.buf._view, 'word_wrap'):
+                word_wrap_enabled = self.buf._view.word_wrap
+            
+            if word_wrap_enabled:
+                self.hscroll.set_visible(False)
+            else:
+                self.hscroll.set_visible(doc_w > viewport_width)
             return False
 
         GLib.idle_add(finalize)
@@ -5589,6 +5637,9 @@ class EditorWindow(Adw.ApplicationWindow):
         super().__init__(application=app)
         self.set_title("Virtual Text Editor")
         self.set_default_size(800, 600)
+        
+        # Word wrap setting (applies to all tabs)
+        self.word_wrap_enabled = False
 
         # Create ToolbarView
         toolbar_view = Adw.ToolbarView()
@@ -5703,8 +5754,9 @@ class EditorWindow(Adw.ApplicationWindow):
         # Add ChromeTab to ChromeTabBar
         self.add_tab_button(page)
         
-        # Focus the new editor view
+        # Apply word wrap setting to new tab
         if hasattr(editor, 'view'):
+            editor.view.word_wrap = self.word_wrap_enabled
             editor.view.grab_focus()
         
         return editor
@@ -5811,6 +5863,11 @@ class EditorWindow(Adw.ApplicationWindow):
         encoding_section.append_submenu("Encoding", encoding_submenu)
         menu.append_section(None, encoding_section)
         
+        # View section
+        view_section = Gio.Menu()
+        view_section.append("Word Wrap", "win.word-wrap")
+        menu.append_section("View", view_section)
+        
         return menu
     
     def setup_actions(self):
@@ -5833,6 +5890,15 @@ class EditorWindow(Adw.ApplicationWindow):
         tab_activate_action = Gio.SimpleAction.new("tab_activate", GLib.VariantType.new("i"))
         tab_activate_action.connect("activate", self.on_tab_activate_action)
         self.add_action(tab_activate_action)
+        
+        # Word wrap toggle action
+        word_wrap_action = Gio.SimpleAction.new_stateful(
+            "word-wrap",
+            None,
+            GLib.Variant.new_boolean(False)
+        )
+        word_wrap_action.connect("activate", self.on_word_wrap_toggle)
+        self.add_action(word_wrap_action)
     
     def on_save_as(self, action, parameter):
         """Handle Save As menu action"""
@@ -5889,6 +5955,27 @@ class EditorWindow(Adw.ApplicationWindow):
         # Note: We don't change self.buf.file.encoding because that would
         # re-decode the file with the wrong encoding, showing garbage.
         # The encoding change only affects how the file is saved.
+
+
+    def on_word_wrap_toggle(self, action, parameter):
+        """Toggle word wrap for all editor tabs"""
+        # Toggle the state
+        current_state = action.get_state().get_boolean()
+        new_state = not current_state
+        action.set_state(GLib.Variant.new_boolean(new_state))
+        
+        # Store as window-level setting
+        self.word_wrap_enabled = new_state
+        
+        # Apply to all existing tabs
+        for i in range(self.tab_view.get_n_pages()):
+            page = self.tab_view.get_nth_page(i)
+            editor = page.get_child()  # Get the actual EditorPage
+            if hasattr(editor, 'view'):
+                editor.view.word_wrap = new_state
+                editor.view.queue_draw()
+                # Update scrollbar visibility
+                editor.view.update_scrollbar()
 
 
 
