@@ -21,6 +21,21 @@ except ImportError:
     FIND_FEATURE_AVAILABLE = False
     print("Note: Find feature not available (find_feature.py not found)")
 
+# Optional: Import undo/redo feature if available
+try:
+    from undo_redo_feature import (
+        install_undo_redo, 
+        UndoCommand, 
+        InsertCommand, 
+        DeleteCommand, 
+        CompositeCommand, 
+        UndoStack
+    )
+    UNDO_REDO_AVAILABLE = True
+except ImportError:
+    UNDO_REDO_AVAILABLE = False
+    print("Note: Undo/Redo feature not available (undo_redo_feature.py not found)")
+
 
 # Global variable to track dragged tab for drag and drop
 DRAGGED_TAB = None
@@ -1332,295 +1347,10 @@ class Selection:
 
 
 # ============================================================
-#   BUFFER
-# ============================================================
-
-# ============================================================
 #   UNDO / REDO SYSTEM
 # ============================================================
-
-class UndoCommand:
-    """Abstract base class for undoable commands"""
-    def undo(self, buffer):
-        pass
-        
-    def redo(self, buffer):
-        pass
-        
-    def merge(self, other):
-        """Try to merge with a subsequent command. Returns True if merged."""
-        return False
-
-
-class InsertCommand(UndoCommand):
-    def __init__(self, line, col, text, cursor_after_line, cursor_after_col, lines=None):
-        self.line = line
-        self.col = col
-        self.text = text
-        self.lines = lines
-        
-        # Memory Optimization: If direct lines list provided, don't store full text
-        # This allows sharing string objects with the buffer's inserted_lines
-        if self.lines and len(self.lines) > 100:
-             self.text = None
-
-        self.cursor_after_line = cursor_after_line
-        self.cursor_after_col = cursor_after_col
-        self.timestamp = time.time()
-        
-    def undo(self, buffer):
-        # To undo an insertion, we delete the inserted range.
-        # We know where it started (line, col).
-        
-        if self.lines:
-            lines_count = len(self.lines)
-            if lines_count == 1:
-                end_line = self.line
-                end_col = self.col + len(self.lines[0])
-            else:
-                end_line = self.line + lines_count - 1
-                end_col = len(self.lines[-1])
-        else:
-            # Fallback for legacy commands or small edits
-            text_lines = self.text.split('\n')
-            if len(text_lines) == 1:
-                end_line = self.line
-                end_col = self.col + len(self.text)
-            else:
-                end_line = self.line + len(text_lines) - 1
-                end_col = len(text_lines[-1])
-            
-        # Select the range
-        buffer.selection.set_start(self.line, self.col)
-        buffer.selection.set_end(end_line, end_col)
-        
-        # Delete it (bypassing the undo stack recording)
-        buffer.delete_selection(_record_undo=False)
-        
-        # Restore cursor to start
-        buffer.cursor_line = self.line
-        buffer.cursor_col = self.col
-        
-    def redo(self, buffer):
-        buffer.cursor_line = self.line
-        buffer.cursor_col = self.col
-        buffer.selection.clear()
-        
-        # Reconstruct text if needed
-        if self.text is None and self.lines:
-            text_to_insert = '\n'.join(self.lines)
-        else:
-            text_to_insert = self.text
-            
-        buffer.insert_text(text_to_insert, _record_undo=False)
-        
-        # Restore cursor
-        buffer.cursor_line = self.cursor_after_line
-        buffer.cursor_col = self.cursor_after_col
-
-    def merge(self, other):
-        if not isinstance(other, InsertCommand):
-            return False
-            
-        # Check if other immediately follows self
-        # We need to know where 'self' ended.
-        if self.lines:
-            if len(self.lines) == 1:
-                my_end_line = self.line
-                my_end_col = self.col + len(self.lines[0])
-            else:
-                my_end_line = self.line + len(self.lines) - 1
-                my_end_col = len(self.lines[-1])
-        else:
-            lines = self.text.split('\n')
-            if len(lines) == 1:
-                my_end_line = self.line
-                my_end_col = self.col + len(self.text)
-            else:
-                my_end_line = self.line + len(lines) - 1
-                my_end_col = len(lines[-1])
-            
-        if other.line != my_end_line or other.col != my_end_col:
-            return False
-            
-        # Check for word grouping logic
-        # User requested "word based".
-        
-        if other.timestamp - self.timestamp > 2.0:
-            return False
-            
-        # If we have complex lines structure (paste), don't merge simple typing
-        if self.lines or other.lines:
-            return False
-
-        def group_type(txt):
-            if not txt: return 0
-            if txt.isspace(): return 1 # Whitespace
-            # Alphanumeric
-            if txt.isalnum() or txt == '_': return 2
-            # Punctuation / Symbols
-            return 3
-            
-        last_group = group_type(self.text[-1])
-        new_group = group_type(other.text[0])
-        
-        if '\n' in self.text:
-            return False # Don't merge across lines for now, safer
-            
-        if last_group == 1 and new_group != 1:
-            return False # " " -> "a" : Break
-            
-        # If we have too much text, break
-        if len(self.text) > 50:
-             return False
-             
-        self.text += other.text
-        self.cursor_after_line = other.cursor_after_line
-        self.cursor_after_col = other.cursor_after_col
-        self.timestamp = other.timestamp # Update time
-        return True
-
-
-class DeleteCommand(UndoCommand):
-    def __init__(self, line, col, text, restore_selection=True):
-        self.line = line
-        self.col = col
-        self.text = text
-        self.restore_selection = restore_selection
-        self.timestamp = time.time()
-
-    def undo(self, buffer):
-        buffer.cursor_line = self.line
-        buffer.cursor_col = self.col
-        buffer.insert_text(self.text, _record_undo=False)
-
-        if self.restore_selection:
-            # Calculate range end
-            lines = self.text.split('\n')
-            if len(lines) == 1:
-                end_line = self.line
-                end_col = self.col + len(self.text)
-            else:
-                end_line = self.line + len(lines) - 1
-                end_col = len(lines[-1])
-            
-            buffer.selection.set_start(self.line, self.col)
-            buffer.selection.set_end(end_line, end_col)
-        
-    def redo(self, buffer):
-        # Calculate range
-        lines = self.text.split('\n')
-        if len(lines) == 1:
-            end_line = self.line
-            end_col = self.col + len(self.text)
-        else:
-            end_line = self.line + len(lines) - 1
-            end_col = len(lines[-1])
-            
-        buffer.selection.set_start(self.line, self.col)
-        buffer.selection.set_end(end_line, end_col)
-        buffer.delete_selection(_record_undo=False)
-
-    def merge(self, other):
-        if not isinstance(other, DeleteCommand):
-            return False
-            
-        # Merge sequential backward deletes (Backspace)
-        # Sequence: del 'c' at (0,2), then del 'b' at (0,1)
-        # other is new command.
-        
-        lines_other = other.text.split('\n')
-        if len(lines_other) == 1:
-             # Backward delete merge
-             if other.line == self.line and (other.col + len(other.text)) == self.col:
-                 self.col = other.col
-                 self.text = other.text + self.text
-                 self.timestamp = other.timestamp
-                 return True
-             
-             # Forward delete merge (Delete key)
-             if other.line == self.line and other.col == self.col:
-                 self.text += other.text
-                 self.timestamp = other.timestamp
-                 return True
-                 
-        return False
-
-
-class CompositeCommand(UndoCommand):
-    """Represents a group of commands executed as a single undo step"""
-    def __init__(self, commands):
-        self.commands = commands # List of commands in execution order
-        
-    def undo(self, buffer):
-        # Undo in reverse order
-        for cmd in reversed(self.commands):
-            cmd.undo(buffer)
-            
-    def redo(self, buffer):
-        # Redo in execution order
-        for cmd in self.commands:
-            cmd.redo(buffer)
-            
-    def merge(self, other):
-        return False
-
-
-
-class UndoStack:
-    def __init__(self, buffer):
-        self.buffer = buffer
-        self.undo_stack = []
-        self.redo_stack = []
-        self.max_size = 1000
-        self.is_doing_undo = False
-        
-    def add_command(self, cmd):
-        if self.is_doing_undo:
-            return
-            
-        # Try to merge with top of stack
-        if self.undo_stack:
-            if self.undo_stack[-1].merge(cmd):
-                return
-                
-        self.undo_stack.append(cmd)
-        self.redo_stack.clear()
-        
-        if len(self.undo_stack) > self.max_size:
-            self.undo_stack.pop(0)
-            
-    def undo(self):
-        if not self.undo_stack:
-            return
-            
-        cmd = self.undo_stack.pop()
-        self.redo_stack.append(cmd)
-        
-        self.is_doing_undo = True
-        try:
-            cmd.undo(self.buffer)
-        finally:
-            self.is_doing_undo = False
-            
-    def redo(self):
-        if not self.redo_stack:
-            return
-            
-        cmd = self.redo_stack.pop()
-        self.undo_stack.append(cmd)
-        
-        self.is_doing_undo = True
-        try:
-            cmd.redo(self.buffer)
-        finally:
-            self.is_doing_undo = False
-
-    def can_undo(self):
-        return len(self.undo_stack) > 0
-        
-    def can_redo(self):
-        return len(self.redo_stack) > 0
+# NOTE: Undo/Redo classes are now in undo_redo_feature.py module
+# If the module is not available, undo/redo functionality will be disabled
 
 
 class VirtualBuffer(GObject.Object):
@@ -1642,7 +1372,13 @@ class VirtualBuffer(GObject.Object):
         # State for Alt+Arrow movement
         self.last_move_was_partial = False
         self.expected_selection = None
-        self.undo_stack = UndoStack(self)
+        
+        # Initialize undo/redo if available
+        if UNDO_REDO_AVAILABLE:
+            self.undo_stack = UndoStack(self)
+        else:
+            self.undo_stack = None
+            
         self.syntax_engine = SyntaxEngine()
         self.syntax_engine.set_text_provider(self.get_line)
         
@@ -1673,6 +1409,8 @@ class VirtualBuffer(GObject.Object):
 
 
     def undo(self):
+        if self.undo_stack is None:
+            return
         self.begin_action()
         try:
             self.undo_stack.undo()
@@ -1680,6 +1418,8 @@ class VirtualBuffer(GObject.Object):
             self.end_action()
 
     def redo(self):
+        if self.undo_stack is None:
+            return
         self.begin_action()
         try:
             self.undo_stack.redo()
@@ -2048,7 +1788,7 @@ class VirtualBuffer(GObject.Object):
             # Update line offsets
             self._add_offset(start_line + 1, -lines_deleted)
         
-        if _record_undo:
+        if _record_undo and self.undo_stack is not None:
              cmd = DeleteCommand(start_line, start_col, deleted_text, restore_selection=restore_selection_on_undo)
              self.undo_stack.add_command(cmd)
 
@@ -2097,7 +1837,7 @@ class VirtualBuffer(GObject.Object):
 
             self.cursor_col += len(text)
             
-            if _record_undo:
+            if _record_undo and self.undo_stack is not None:
                 cmd = InsertCommand(start_ln, start_col, text, self.cursor_line, self.cursor_col)
                 self.undo_stack.add_command(cmd)
             
@@ -2179,7 +1919,7 @@ class VirtualBuffer(GObject.Object):
 
         self.selection.clear()
         
-        if _record_undo:
+        if _record_undo and self.undo_stack is not None:
             # OPTIMIZATION: Pass 'parts' (list of strings) to InsertCommand
             # This allows sharing string objects between buffer and undo stack,
             # preventing memory duplication for huge pastes.
@@ -3664,7 +3404,7 @@ class VirtualBuffer(GObject.Object):
         self.insert_text(replacement, _record_undo=False)
         
         # Record Undo
-        if _record_undo:
+        if _record_undo and self.undo_stack is not None:
             comp = CompositeCommand(commands)
             self.undo_stack.add_command(comp)
             
@@ -3693,8 +3433,9 @@ class VirtualBuffer(GObject.Object):
                 
             if all_cmds:
                 # Create a single composite command for all replacements
-                comp = CompositeCommand(all_cmds)
-                self.undo_stack.add_command(comp)
+                if self.undo_stack is not None:
+                    comp = CompositeCommand(all_cmds)
+                    self.undo_stack.add_command(comp)
         finally:
             self.end_action()
             
