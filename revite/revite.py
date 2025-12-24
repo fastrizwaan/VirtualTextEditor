@@ -36,6 +36,78 @@ except ImportError:
     UNDO_REDO_AVAILABLE = False
     print("Note: Undo/Redo feature not available (undo_redo_feature.py not found)")
 
+# Optional: Import selection feature if available
+try:
+    from selection_feature import Selection, SelectionManager
+    SELECTION_FEATURE_AVAILABLE = True
+except ImportError:
+    SELECTION_FEATURE_AVAILABLE = False
+    print("Note: Selection feature not available (selection_feature.py not found)")
+    # Define fallback Selection class
+    class Selection:
+        """Fallback Selection class if module not available"""
+        def __init__(self):
+            self.start_line = -1
+            self.start_col = -1
+            self.end_line = -1
+            self.end_col = -1
+            self.active = False
+            self.selecting_with_keyboard = False
+        
+        def clear(self):
+            self.start_line = -1
+            self.start_col = -1
+            self.end_line = -1
+            self.end_col = -1
+            self.active = False
+            self.selecting_with_keyboard = False
+        
+        def set_start(self, line, col):
+            self.start_line = line
+            self.start_col = col
+            self.end_line = line
+            self.end_col = col
+            self.active = True
+        
+        def set_end(self, line, col):
+            self.end_line = line
+            self.end_col = col
+            self.active = (self.start_line != self.end_line or self.start_col != self.end_col)
+        
+        def has_selection(self):
+            return self.active and (
+                self.start_line != self.end_line or 
+                self.start_col != self.end_col
+            )
+        
+        def get_bounds(self):
+            if not self.has_selection():
+                return None, None, None, None
+            if self.start_line < self.end_line:
+                return self.start_line, self.start_col, self.end_line, self.end_col
+            elif self.start_line > self.end_line:
+                return self.end_line, self.end_col, self.start_line, self.start_col
+            else:
+                if self.start_col <= self.end_col:
+                    return self.start_line, self.start_col, self.end_line, self.end_col
+                else:
+                    return self.end_line, self.end_col, self.start_line, self.start_col
+        
+        def contains_position(self, line, col):
+            if not self.has_selection():
+                return False
+            start_line, start_col, end_line, end_col = self.get_bounds()
+            if line < start_line or line > end_line:
+                return False
+            if line == start_line and line == end_line:
+                return start_col <= col <= end_col
+            elif line == start_line:
+                return col >= start_col
+            elif line == end_line:
+                return col <= end_col
+            else:
+                return True
+
 
 # Global variable to track dragged tab for drag and drop
 DRAGGED_TAB = None
@@ -1256,94 +1328,9 @@ class IndexedFile:
 # ============================================================
 #   SELECTION
 # ============================================================
+# NOTE: Selection class is now in selection_feature.py module
+# If the module is not available, a fallback Selection class is defined in the import section above
 
-class Selection:
-    """Manages text selection state"""
-    
-    def __init__(self):
-        self.start_line = -1
-        self.start_col = -1
-        self.end_line = -1
-        self.end_col = -1
-        self.active = False
-        self.selecting_with_keyboard = False
-    
-    def clear(self):
-        """Clear the selection"""
-        self.start_line = -1
-        self.start_col = -1
-        self.end_line = -1
-        self.end_col = -1
-        self.active = False
-        self.selecting_with_keyboard = False
-    
-    def set_wrap_enabled(self, enabled):
-        """Enable or disable word wrap."""
-        if self.wrap_enabled == enabled:
-            return
-        
-        self.wrap_enabled = enabled
-        self.wrap_cache = {}
-        self.visual_line_map = []
-        # self.total_visual_lines_cache = None
-        self.visual_line_anchor = (0, 0)
-
-    def set_start(self, line, col):
-        """Set selection start point"""
-        self.start_line = line
-        self.start_col = col
-        self.end_line = line
-        self.end_col = col
-        self.active = True
-    
-    def set_end(self, line, col):
-        """Set selection end point"""
-        self.end_line = line
-        self.end_col = col
-        self.active = (self.start_line != self.end_line or self.start_col != self.end_col)
-    
-    def has_selection(self):
-        """Check if there's an active selection"""
-        return self.active and (
-            self.start_line != self.end_line or 
-            self.start_col != self.end_col
-        )
-    
-    def get_bounds(self):
-        """Get normalized selection bounds (start always before end)"""
-        if not self.has_selection():
-            return None, None, None, None
-            
-        # Normalize so start is always before end
-        if self.start_line < self.end_line:
-            return self.start_line, self.start_col, self.end_line, self.end_col
-        elif self.start_line > self.end_line:
-            return self.end_line, self.end_col, self.start_line, self.start_col
-        else:
-            # Same line
-            if self.start_col <= self.end_col:
-                return self.start_line, self.start_col, self.end_line, self.end_col
-            else:
-                return self.end_line, self.end_col, self.start_line, self.start_col
-    
-    def contains_position(self, line, col):
-        """Check if a position is within the selection"""
-        if not self.has_selection():
-            return False
-            
-        start_line, start_col, end_line, end_col = self.get_bounds()
-        
-        if line < start_line or line > end_line:
-            return False
-        
-        if line == start_line and line == end_line:
-            return start_col <= col <= end_col
-        elif line == start_line:
-            return col >= start_col
-        elif line == end_line:
-            return col <= end_col
-        else:
-            return True
 
 
 # ============================================================
