@@ -1,0 +1,12 @@
+.flatpak-builder
+
+# Models / assets
+en_US-ryan-medium.onnx
+en_US-ryan-medium.onnx.json
+*.onnx
+*.onnx.json
+*.wav
+
+# Python bytecode
+__pycache__/
+*.pyc
